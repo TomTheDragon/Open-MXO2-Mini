@@ -8,7 +8,7 @@ Version:        0.1
 Release:        1%{?dist}
 Summary:        Matrox MXO2 Mini capture box driver (DKMS)
 License:        GPL-2.0-only
-URL:            https://github.com/
+URL:            https://github.com/TomTheDragon/Open-MXO2-Mini
 Source0:        open-mxo2-mini-%{version}.tar.gz
 BuildArch:      noarch
 
