@@ -1,0 +1,37 @@
+# Matrox installers, user guide and datasheets (not redistributable)
+/original/
+
+# Matrox Windows driver binaries and everything derived from them directly
+# (decompiled C, disassembly, Ghidra project) - not redistributable
+/re/bin/
+/re/decomp/
+/re/ghidra-proj/
+
+# Hardware captures, register/I2C/EEPROM dumps, test logs, frames, WAVs (large, machine-specific,
+# partly disassembly); re/NOTES.md summarises the results
+/re/notes/*
+!/re/notes/.gitkeep
+
+# Kernel module build output
+*.o
+*.ko
+*.mod
+*.mod.c
+.*.cmd
+*.order
+*.symvers
+.tmp_versions/
+.cache.mk
+
+# Python
+__pycache__/
+*.pyc
+
+# Packaging output
+/dist/
+/packaging/debian/build/
+/packaging/fedora/rpmbuild/
+/packaging/arch/src/
+/packaging/arch/pkg/
+/packaging/arch/*.tar.gz
+/packaging/arch/*.pkg.tar.*

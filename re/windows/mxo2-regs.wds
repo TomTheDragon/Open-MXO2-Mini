@@ -1,0 +1,48 @@
+.printf "=== MXO2 register shadow dump ===\n"
+r $t0 = 0
+r $t2 = 0
+.foreach /pS 4 /ps 99 (b {lm m MVKAVBUS}) { r $t0 = ${b} }
+.if (@$t0 == 0) {
+  .printf "RESULT: MVKAVBUS module not found (see diagnostics above)\n"
+} .else {
+r $t1 = @$t0 + 0x46050
+r $t3 = @$t0 + 0x43420
+.printf "MVKAVBUS base %p, Gaia vtable %p, bus device vtable %p\n", @$t0, @$t1, @$t3
+!drvobj MVKAVBUS
+.foreach (d {!drvobj MVKAVBUS}) {
+  .if ($spat("${d}", "fffff*") == 1) {
+    .if ($spat("${d}", "*)*") == 0) {
+      r $t4 = poi(${d} + 0x40);
+      r $t5 = poi(@$t4);
+      .printf "device object %p  extension %p  object %p  vtable %p\n", ${d}, @$t4, @$t5, poi(@$t5);
+      .if (poi(@$t5) == @$t3) {
+        r $t6 = poi(@$t5 + 0x850);
+        .printf "  bus device: +0x850 = %p, its vtable %p\n", @$t6, poi(@$t6);
+        .if (poi(@$t6) == @$t1) {
+          r $t2 = @$t6
+        } .else {
+          dps @$t5 L0x10b
+        }
+      }
+    }
+  }
+}
+.if (@$t2 == 0) {
+  .printf "RESULT: Gaia object NOT found\n"
+} .else {
+  r $t7 = poi(@$t2 + 8);
+  r $t8 = dwo(@$t2 + 0x10);
+  r $t11 = dwo(@$t2 + 0x14);
+  .printf "Gaia object %p, register array %p, capacity %d, count %d\n", @$t2, @$t7, @$t8, @$t11;
+  .if (@$t8 > 0x400) {
+    r $t8 = 0x400
+  };
+  .for (r $t9 = 0; @$t9 < @$t8; r $t9 = @$t9 + 1) {
+    r $t10 = poi(@$t7 + @$t9 * 8);
+    .if (@$t10 != 0) {
+      .printf "REG %4d off %08x flags %08x value %08x pending %08x\n", @$t9, dwo(@$t10 + 0x38), dwo(@$t10 + 0x3c), dwo(@$t10 + 0x10), dwo(@$t10 + 0x40)
+    }
+  };
+  .printf "RESULT: done\n"
+}
+}

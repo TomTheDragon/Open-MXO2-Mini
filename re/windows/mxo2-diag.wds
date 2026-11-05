@@ -1,0 +1,11 @@
+$$ Run line by line ($$<), so one failing command does not stop the others.
+.printf "=== MXO2 debugger diagnostics ===\n"
+vertarget
+.sympath
+!sym noisy
+.reload
+x nt!PsLoadedModuleList
+lm m MVK*
+lm m nt
+!sym quiet
+.printf "=== end of diagnostics ===\n"

@@ -1,0 +1,37 @@
+#!/bin/sh
+# V4L2 device test (HDMI source on). Needs v4l-utils: sudo apt install v4l-utils
+# Run with: sudo sh run-v4l2-test.sh
+cd "$(dirname "$0")" || exit 1
+OUT=notes/v4l2-test.txt
+D=/sys/kernel/debug/mxo2/0000:02:00.0
+command -v v4l2-ctl >/dev/null || { echo "v4l2-ctl missing: sudo apt install v4l-utils"; exit 1; }
+{
+	rmmod mxo2 2>/dev/null
+	modprobe -a videodev videobuf2-v4l2 videobuf2-dma-sg || exit 1
+	insmod ../driver/mxo2.ko || exit 1
+	sleep 1
+	DEV=
+	for n in /sys/class/video4linux/video*; do
+		grep -q "MXO2 Mini HDMI" "$n/name" 2>/dev/null && DEV=/dev/$(basename "$n")
+	done
+	echo "# device: $DEV"
+	[ -n "$DEV" ] || { dmesg | tail -10; rmmod mxo2; exit 1; }
+	echo "# v4l2-ctl --all"
+	v4l2-ctl -d "$DEV" --all
+	echo "# stream 300 frames (no saving)"
+	v4l2-ctl -d "$DEV" --stream-mmap=4 --stream-count=300 2>&1 | tr -d '<' | grep -v '^$' | tail -5
+	echo "# debugfs status"
+	cat $D/status
+	echo "# one frame to notes/v4l2-frame.raw (after 10 skipped)"
+	v4l2-ctl -d "$DEV" --stream-mmap=4 --stream-skip=10 --stream-count=1 --stream-to=notes/v4l2-frame.raw 2>&1 | tail -2
+	echo "# read() interface: one frame"
+	dd if="$DEV" of=/dev/null bs=4147200 count=1 2>&1 | tail -1
+	echo "# v4l2-compliance (with streaming)"
+	if command -v v4l2-compliance >/dev/null; then
+		v4l2-compliance -d "$DEV" -s 2>&1 | grep -E 'fail|FAIL|warn|Total|test VIDIOC_(G|S|TRY)_FMT|Streaming' | head -40
+	fi
+	rmmod mxo2
+	echo "# dmesg"
+	dmesg | grep -i -E 'mxo2|videobuf|v4l2' | tail -12
+} 2>&1 | tee $OUT
+chown "${SUDO_USER:-root}" $OUT notes/v4l2-frame.raw 2>/dev/null

@@ -1,0 +1,23 @@
+# Open-MXO2-Mini: Matrox MXO2 Mini driver, DKMS package for Arch Linux.
+# Build: sh ../make-tarball.sh . && makepkg -si
+# The dkms package's pacman hooks build the module for every installed kernel (install its headers, e.g. linux-headers).
+pkgname=open-mxo2-mini-dkms
+pkgver=0.1
+pkgrel=1
+pkgdesc="Matrox MXO2 Mini capture box driver: HDMI/composite capture (V4L2) and audio (ALSA), DKMS"
+arch=('any')
+url="https://github.com/"
+license=('GPL-2.0-only')
+depends=('dkms')
+optdepends=('linux-headers: build the module for the default kernel'
+            'wireplumber: distinct PipeWire names for the two cameras')
+install=open-mxo2-mini-dkms.install
+source=("open-mxo2-mini-$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+package() {
+	cd "open-mxo2-mini-$pkgver"
+	install -Dm644 -t "$pkgdir/usr/src/mxo2-$pkgver" *.c *.h Makefile dkms.conf
+	install -Dm644 51-mxo2.conf "$pkgdir/usr/share/wireplumber/wireplumber.conf.d/51-mxo2.conf"
+	install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+}
