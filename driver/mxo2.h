@@ -134,6 +134,7 @@ struct mxo2_audio {
 	bool play_holding;      /* holds a playback engine reference */
 	snd_pcm_uframes_t play_ptr, play_period_pos;
 	struct mutex play_mutex; /* engine delivery vs. close */
+	struct work_struct play_work; /* starts the playback engine after trigger START */
 	u64 play_samples, play_underruns;
 	u64 silence_ns;         /* silence generated up to this time, 0 = not generating */
 	u64 silence_samples;

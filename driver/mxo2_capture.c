@@ -780,7 +780,8 @@ bool mxo2_cap_weave(struct mxo2 *m)
 {
 	if (m->input == MXO2_INPUT_HDMI)
 		return m->in_interlaced;
-	return m->in_interlaced && (m->streaming ? m->streaming->height : 480) >= 480;
+	/* only the 720-wide full-height format weaves; 640 / 512 double one field (mxo2_v4l2.c) */
+	return m->in_interlaced && (m->streaming ? m->streaming->height >= 480 && m->streaming->width == 720 : true);
 }
 
 /* The running thread's mode no longer matches the input (it was started for audio, or the input changed). */

@@ -637,8 +637,33 @@ static int play_open(struct snd_pcm_substream *ss)
 	return 0;
 }
 
+/*
+ * The playback engine takes the whole card (pass-through off, capture refused), so it is started only when the
+ * stream really starts playing (trigger START), not at prepare: alsa-lib prepares on every hw_params, and
+ * PipeWire's card probing does that on both directions - taking the card there made the capture fail and
+ * PipeWire drop the input. Trigger runs atomic, so a work item starts / stops the engine.
+ */
+static void play_work_fn(struct work_struct *work)
+{
+	struct mxo2 *m = container_of(work, struct mxo2, audio.play_work);
+	struct mxo2_audio *a = &m->audio;
+
+	mutex_lock(&a->play_mutex);
+	if (READ_ONCE(a->play_running) && !a->play_holding) {
+		mutex_unlock(&a->play_mutex);
+		if (mxo2_play_engine_get(m, MXO2_PLAY_AUDIO, -1)) {
+			dev_info(&m->pdev->dev, "audio out: card busy (capture runs), not playing\n");
+			return;
+		}
+		mutex_lock(&a->play_mutex);
+		a->play_holding = true;
+	}
+	mutex_unlock(&a->play_mutex);
+}
+
 static void play_release_engine(struct mxo2 *m)
 {
+	cancel_work_sync(&m->audio.play_work);
 	if (m->audio.play_holding) {
 		m->audio.play_holding = false;
 		mxo2_play_engine_put(m, MXO2_PLAY_AUDIO);
@@ -666,19 +691,11 @@ static int play_hw_free(struct snd_pcm_substream *ss)
 	return 0;
 }
 
-/* The playback engine is started here (may sleep), not in trigger (atomic). */
 static int play_prepare(struct snd_pcm_substream *ss)
 {
 	struct mxo2 *m = snd_pcm_substream_chip(ss);
 	unsigned long flags;
-	int ret;
 
-	if (!m->audio.play_holding) {
-		ret = mxo2_play_engine_get(m, MXO2_PLAY_AUDIO, -1);
-		if (ret)
-			return ret;
-		m->audio.play_holding = true;
-	}
 	spin_lock_irqsave(&m->audio.lock, flags);
 	m->audio.play_ptr = 0;
 	m->audio.play_period_pos = 0;
@@ -694,10 +711,11 @@ static int play_trigger(struct snd_pcm_substream *ss, int cmd)
 	case SNDRV_PCM_TRIGGER_START:
 	case SNDRV_PCM_TRIGGER_RESUME:
 		m->audio.play_running = true;
+		schedule_work(&m->audio.play_work);     /* engine start may sleep */
 		return 0;
 	case SNDRV_PCM_TRIGGER_STOP:
 	case SNDRV_PCM_TRIGGER_SUSPEND:
-		m->audio.play_running = false;
+		m->audio.play_running = false;  /* the engine keeps running (silence) until hw_free / close */
 		return 0;
 	}
 	return -EINVAL;
@@ -756,6 +774,7 @@ int mxo2_audio_register(struct mxo2 *m)
 	spin_lock_init(&a->lock);
 	mutex_init(&a->mutex);
 	mutex_init(&a->play_mutex);
+	INIT_WORK(&a->play_work, play_work_fn);
 	a->bounce = dma_alloc_coherent(dev, A_SLOT_BYTES, &a->bounce_dma, GFP_KERNEL);
 	a->bounce_sg = dma_alloc_coherent(dev, PAGE_SIZE, &a->bounce_sg_dma, GFP_KERNEL);
 	if (!a->bounce || !a->bounce_sg) {

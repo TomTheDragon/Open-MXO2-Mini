@@ -53,7 +53,6 @@ module_param(retro_dots320, uint, 0644);
 MODULE_PARM_DESC(retro_dots320, "Console dots per line for the 320-wide format (default 420: Mega Drive, PlayStation)");
 
 #define RETRO_SRC_W 720
-static const u32 retro_widths[] = { 320, 256 };
 
 static u8 chroma_lut[256];
 
@@ -75,11 +74,15 @@ static void fix_chroma(u8 *p, size_t bytes)
 
 /*
  * Analog sizes, offered for any analog signal (480i or 240p, NTSC or PAL) and without one: the full frame
- * (720x480/576: woven fields from a 480i signal, each line doubled from a 240p signal) and one field (240/288 lines:
- * the 240p picture, or one field per frame from a 480i signal) at 320 and 256 wide, on the console's pixel grid.
- * (No 720-wide field size: the line-doubled full frame shows the same picture.)
+ * (720x480/576: woven fields from a 480i signal, each line doubled from a 240p signal), one field (240/288 lines:
+ * the 240p picture, or one field per frame from a 480i signal) at 320 and 256 wide on the console's pixel grid,
+ * and the same 320 / 256 pictures doubled (640 / 512 x 480/576, every console pixel 2 x 2) for apps that enlarge
+ * with a smoothing filter. (No 720-wide field size: the line-doubled full frame shows the same picture.)
  */
-#define ANALOG_SIZES (1 + ARRAY_SIZE(retro_widths))
+static const struct { u16 w; bool full; } analog_table[] = {
+	{ RETRO_SRC_W, true }, { 320, false }, { 256, false }, { 640, true }, { 512, true },
+};
+#define ANALOG_SIZES ARRAY_SIZE(analog_table)
 
 static struct mxo2_sig *vsig(struct mxo2_vid *vid)
 {
@@ -102,8 +105,19 @@ static u32 field_lines(struct mxo2_vid *vid)
 
 static void analog_size(struct mxo2_vid *vid, unsigned int i, u32 *w, u32 *h)
 {
-	*w = i ? retro_widths[i - 1] : RETRO_SRC_W;
-	*h = i ? field_lines(vid) : 2 * field_lines(vid);
+	*w = analog_table[i].w;
+	*h = analog_table[i].full ? 2 * field_lines(vid) : field_lines(vid);
+}
+
+/* Console pixels per line of a scaled width (640 / 512 are 320 / 256 doubled) */
+static u32 console_width(u32 w)
+{
+	return w > 320 && w != RETRO_SRC_W ? w / 2 : w;
+}
+
+static bool pixel_doubled(u32 w)
+{
+	return w == 640 || w == 512;
 }
 
 /* A supported size for a request (exact, else the analog default 720 x full height). */
@@ -125,17 +139,17 @@ static void pick_size(struct mxo2_vid *vid, u32 want_w, u32 want_h, u32 *w, u32 
 	*h = s->width ? s->height : vid->hdmi_height;
 }
 
-/* Woven (interlaced) frames for a size? */
-static bool size_woven(struct mxo2_vid *vid, u32 h)
+/* Woven (interlaced) frames for a size? Analog: only 720 x full height from an interlaced signal. */
+static bool size_woven(struct mxo2_vid *vid, u32 w, u32 h)
 {
 	struct mxo2_sig *s = vsig(vid);
 
 	if (!analog_sizes(vid))
 		return s->width ? s->interlaced : vid->hdmi_interlaced;
-	return s->interlaced && h >= 480;
+	return s->interlaced && h >= 480 && w == RETRO_SRC_W;
 }
 
-static u32 size_fps(struct mxo2_vid *vid, u32 h)
+static u32 size_fps(struct mxo2_vid *vid, u32 w, u32 h)
 {
 	struct mxo2_sig *s = vsig(vid);
 	u32 rate;
@@ -143,10 +157,10 @@ static u32 size_fps(struct mxo2_vid *vid, u32 h)
 	if (!analog_sizes(vid))
 		return s->fps ? s->fps : 30;
 	rate = field_lines(vid) == 288 ? 50 : 60;               /* fields per second */
-	return size_woven(vid, h) ? rate / 2 : rate;
+	return size_woven(vid, w, h) ? rate / 2 : rate;
 }
 
-/* Field-sized composite format at a scaled width (bounce + horizontal scaler). */
+/* Analog format at a scaled width (bounce + horizontal scaler): 320 / 256, and doubled 640 / 512. */
 static bool scaled_width(struct mxo2_vid *vid)
 {
 	return analog_sizes(vid) && vid->width != RETRO_SRC_W;
@@ -236,6 +250,23 @@ static void scale_line(const u8 *src, u8 *dst, const struct mxo2_scale_tap *t, u
 	}
 }
 
+/* YUYV line of w pixels -> 2w pixels, each pixel twice (its pair's chroma kept) */
+static void double_pixels(const u8 *src, u8 *dst, u32 w)
+{
+	u32 p;
+
+	for (p = 0; p < w / 2; p++, src += 4, dst += 8) {
+		dst[0] = src[0];
+		dst[1] = src[1];
+		dst[2] = src[0];
+		dst[3] = src[3];
+		dst[4] = src[2];
+		dst[5] = src[1];
+		dst[6] = src[2];
+		dst[7] = src[3];
+	}
+}
+
 static struct mxo2_vbuf *to_mbuf(struct vb2_buffer *vb)
 {
 	return container_of(to_vb2_v4l2_buffer(vb), struct mxo2_vbuf, vb);
@@ -268,7 +299,7 @@ static void update_format(struct mxo2_vid *vid)
 		vid->hdmi_interlaced = s->interlaced;
 	}
 	pick_size(vid, vid->req_width, vid->req_height, &vid->width, &vid->height);
-	vid->fmt_interlaced = size_woven(vid, vid->height);
+	vid->fmt_interlaced = size_woven(vid, vid->width, vid->height);
 	vid->fmt_input = vid->m->input;
 }
 
@@ -335,20 +366,33 @@ void mxo2_v4l2_frame(struct mxo2 *m, unsigned int slot)
 			ret = -ENOMEM;
 		if (!ret) {
 			mxo2_hbuf_sync(m, &vid->bounce, true);
-			for (r = 0; r < vid->height; r++) {
-				const u8 *src = (u8 *)vid->bounce.vaddr +
-						min(vid->line_double ? r / 2 : r, last) * m->cap_line_bytes;
+			u32 stride = vid->width * 2;
 
-				if (notch && (!vid->line_double || !(r & 1))) {
+			for (r = 0; r < vid->height; r++) {
+				u8 *out = dst + r * stride;
+				const u8 *src;
+
+				if (vid->line_double && (r & 1)) {      /* second copy of a field line */
+					memcpy(out, out - stride, stride);
+					continue;
+				}
+				src = (u8 *)vid->bounce.vaddr +
+				      min(vid->line_double ? r / 2 : r, last) * m->cap_line_bytes;
+				if (notch) {
 					memcpy(vid->linebuf, src, m->cap_line_bytes);
 					fsc_notch_line(vid->linebuf, m->cap_line_bytes / 2);
-				}
-				if (notch)
 					src = vid->linebuf;
-				if (vid->taps)
-					scale_line(src, dst + r * vid->width * 2, vid->taps, vid->width);
-				else
-					memcpy(dst + r * vid->width * 2, src, vid->width * 2);
+				}
+				if (!vid->taps) {
+					memcpy(out, src, stride);
+				} else if (pixel_doubled(vid->width)) {
+					u8 *tmp = vid->linebuf + RETRO_SRC_W * 2;
+
+					scale_line(src, tmp, vid->taps, vid->width / 2);
+					double_pixels(tmp, out, vid->width / 2);
+				} else {
+					scale_line(src, out, vid->taps, vid->width);
+				}
 			}
 		}
 	} else {
@@ -497,15 +541,17 @@ static int start_streaming(struct vb2_queue *q, unsigned int count)
 	}
 	vid->sequence = 0;
 	/* 240p/288p signal at full height: one packed field per frame, each line delivered twice */
-	vid->line_double = analog_sizes(vid) && vid->height == 2 * field_lines(vid) && !m->in_interlaced;
+	/* full height from one packed field per frame: 240p/288p signal, or the doubled 640 / 512 sizes */
+	vid->line_double = analog_sizes(vid) && vid->height == 2 * field_lines(vid) &&
+			   (!m->in_interlaced || pixel_doubled(vid->width));
 	if (scaled_width(vid) || vid->line_double) {
 		ret = 0;
 		if (scaled_width(vid)) {
-			vid->taps = build_taps(vid->width, field_lines(vid) == 288 ? 864 : 858);
+			vid->taps = build_taps(console_width(vid->width), field_lines(vid) == 288 ? 864 : 858);
 			ret = vid->taps ? 0 : -ENOMEM;
 		}
 		if (!ret) {
-			vid->linebuf = kmalloc(RETRO_SRC_W * 2, GFP_KERNEL);
+			vid->linebuf = kmalloc(2 * RETRO_SRC_W * 2, GFP_KERNEL);  /* filtered + scaled line */
 			ret = vid->linebuf ? 0 : -ENOMEM;
 		}
 		if (!ret)
@@ -577,7 +623,7 @@ static void fill_fmt(struct mxo2_vid *vid, struct v4l2_pix_format *pix, u32 widt
 	pix->width = width;
 	pix->height = height;
 	pix->pixelformat = V4L2_PIX_FMT_YUYV;
-	pix->field = size_woven(vid, height) ? woven_field(analog_sizes(vid)) : V4L2_FIELD_NONE;
+	pix->field = size_woven(vid, width, height) ? woven_field(analog_sizes(vid)) : V4L2_FIELD_NONE;
 	pix->bytesperline = width * 2;
 	pix->sizeimage = width * height * 2;
 	pix->colorspace = height >= 720 ? V4L2_COLORSPACE_REC709 : V4L2_COLORSPACE_SMPTE170M;
@@ -625,7 +671,7 @@ static int vidioc_s_fmt(struct file *file, void *priv, struct v4l2_format *f)
 		vid->req_height = h;
 		vid->width = w;
 		vid->height = h;
-		vid->fmt_interlaced = size_woven(vid, h);
+		vid->fmt_interlaced = size_woven(vid, w, h);
 	}
 	fill_fmt(vid, &f->fmt.pix, vid->width, vid->height);
 	return 0;
@@ -663,7 +709,7 @@ static int vidioc_enum_frameintervals(struct file *file, void *priv, struct v4l2
 		return -EINVAL;
 	fi->type = V4L2_FRMIVAL_TYPE_DISCRETE;
 	fi->discrete.numerator = 1;
-	fi->discrete.denominator = size_fps(vid, h);
+	fi->discrete.denominator = size_fps(vid, w, h);
 	return 0;
 }
 
@@ -677,7 +723,7 @@ static int vidioc_g_parm(struct file *file, void *priv, struct v4l2_streamparm *
 	sp->parm.capture.capability = V4L2_CAP_TIMEPERFRAME;
 	sp->parm.capture.readbuffers = 3;
 	sp->parm.capture.timeperframe.numerator = 1;
-	sp->parm.capture.timeperframe.denominator = size_fps(vid, vid->height);
+	sp->parm.capture.timeperframe.denominator = size_fps(vid, vid->width, vid->height);
 	return 0;
 }
 
@@ -696,11 +742,13 @@ static int vidioc_g_pixelaspect(struct file *file, void *priv, int type, struct 
 	f->numerator = 1;
 	f->denominator = 1;
 	if (scaled_width(vid)) {
-		/* pixel = span / width samples; a 240p sample is 10/22 (NTSC) or 59/108 (PAL) as wide as tall */
-		bool pal = vid->height == 288;
-		u32 span100 = retro_span100(vid->width, pal ? 864 : 858), g;
+		/* pixel = span / width samples; a 240p sample is 10/22 (NTSC) or 59/108 (PAL) as wide as tall;
+		 * doubled sizes: half as wide and half as tall, same shape */
+		bool pal = field_lines(vid) == 288;
+		u32 cw = console_width(vid->width);
+		u32 span100 = retro_span100(cw, pal ? 864 : 858), g;
 
-		f->numerator = vid->width * (pal ? 108 : 22) * 10;
+		f->numerator = cw * (pal ? 108 : 22) * 10;
 		f->denominator = span100 * (pal ? 59 : 10) / 10;
 		g = gcd(f->numerator, f->denominator);
 		f->numerator /= g;

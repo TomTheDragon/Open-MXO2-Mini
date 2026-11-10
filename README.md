@@ -21,7 +21,7 @@ speaks V4L2.
 | Input | Formats (YUYV 4:2:2) | Notes |
 |---|---|---|
 | **HDMI** | 1080p 24/25/30/50/60, 1080i 50/60, 720p 50/60, 576p (480p, 576i, 480i implemented, untested) | RGB and YCbCr sources, 16:9/4:3 pixel aspect for SD |
-| **Composite** | 720×480/576 (480i/576i woven, or 240p line-doubled), **320×240/288** and **256×240/288** | Retro consoles' 240p supported. 256/320 are sampled on the console's pixel grid (NES/SNES/Famicom 341 dots per line, Mega Drive/PlayStation 420) |
+| **Composite** | 720×480/576 (480i/576i woven, or 240p line-doubled), **320×240/288** and **256×240/288**, and those two doubled: **640×480/576**, **512×480/576** | Retro consoles' 240p supported. 256/320 are sampled on the console's pixel grid (NES/SNES/Famicom 341 dots per line, Mega Drive/PlayStation 420) |
 | **Audio** | 48 kHz stereo | HDMI audio, or the analog audio inputs together with composite |
 
 - One capture device **"Matrox MXO2 Mini"** for all inputs. Its V4L2 inputs are 0 HDMI, 1 Composite, 2 S-Video and
@@ -121,7 +121,9 @@ The examples use `/dev/video0`; `v4l2-ctl --list-devices` shows the number of "M
   4 Component), `--list-framesizes=YUYV`, `-c sharpness=1`
 
 Retro consoles: 256×240 for NES/Famicom/SNES, 320×240 for Mega Drive/PlayStation, 720×480 for a line-doubled
-progressive picture. Pixel aspect is reported (≈ 8:7 at 256), so scale the source to 4:3 in OBS.
+progressive picture. Pixel aspect is reported (≈ 8:7 at 256), so scale the source to 4:3 in OBS. For a crisp
+picture set the OBS source's **Scale Filtering** to **Point**; apps that always smooth when enlarging (VLC,
+browsers) look sharper with **512×480 / 640×480**, the same pictures with every console pixel doubled.
 
 ### Module parameters
 

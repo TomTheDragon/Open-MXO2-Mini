@@ -1472,3 +1472,25 @@ text in `notes/datasheet/AD9398.txt`)
 - **ALSA playback works** (`notes/play-test.txt`): 440 Hz tone alone → sound on HDMI OUT (frame frozen = last
   card frame, as expected); ffmpeg picture + beeps → both. Audio-only engine took the video user without restart
   (one engine session 16:59:27–16:59:59). Not yet judged: tone cleanliness, L/R, beep–flash sync, long-run drift.
+
+## 240p sharpness (2026-11-10)
+- User: 256/320 modes look blurry, 720x480 looks better. Measured from the sandbox (Famicom, Akumajou Densetsu
+  intro text): the scaler is fine – the driver's 256 frame (sharpness 83.6 = sum of squared neighbour
+  differences / 1e6, 23 % mid-grey among non-black pixels) is within ~0.1 console pixel of the best grid phase
+  (90, 22 %) found by sweeping retro_center on the same signal (`scale_sim.py` reproduces the driver output
+  exactly at dx 0). Grid phase stable over 12 consecutive frames (pixel boundary 0.68–0.71 samples). Composite
+  limits: one console pixel spreads over ~4 samples (peak 181 of 220). Colour specks around white text =
+  composite cross-colour, as strong in the 720 source (score 25.8) as at 256 (25.0); box-averaging chroma per
+  pixel pair only 22.0 → not changed. Blur seen by the user most likely = app's bilinear upscaling of a 256x240
+  source (OBS default) → README: Scale Filtering "Point".
+- Added doubled sizes **640x480 / 512x480** (PAL x576): 320 / 256 scaled as before, then each pixel and line
+  twice (double_pixels, line copy). Field-based like the 240-line sizes (60 / 50 fps, Field None, also from a
+  480i signal: mxo2_cap_weave now weaves only for 720 x full height; line_double also for doubled sizes with an
+  interlaced signal). size_woven / size_fps take the width. Pixel aspect = the console size's.
+- **Bug (user: OBS can't select the MXO2 audio input any more)**: since ALSA playback, play_prepare started the
+  playback engine (takes the card, capture refused). alsa-lib prepares on every hw_params, and PipeWire probes a
+  card's profiles by opening both directions → the playback probe took the card, the capture probe got EBUSY →
+  input dropped (pcmC5D0p opened after pcmC5D0c with no test running). Fix: the engine starts only on trigger
+  START (via a work item, trigger is atomic) and stops at hw_free / close. WirePlumber may have stored an
+  output-only profile → restart it / pick the duplex profile once.
+- Fix confirmed: MXO2 audio input selectable in OBS again (engine start on trigger START).
