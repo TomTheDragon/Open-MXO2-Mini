@@ -11,15 +11,18 @@
 cd "$(dirname "$0")" || exit 1
 . ./reload-driver.sh
 OUT=notes/audio-test.txt
-D=/sys/kernel/debug/mxo2/0000:02:00.0
+. ./mxo2-env.sh
+D=/sys/kernel/debug/mxo2/$MXO2_DEV
 {
 	trap pw_restore EXIT INT TERM   # this block is a subshell (pipe to tee)
 	load_driver
 	CARD=$(awk '/MXO2/ {print $1; exit}' /proc/asound/cards)
 	VDEV=
 	for n in /sys/class/video4linux/video*; do
-		grep -q "MXO2 Mini HDMI" "$n/name" 2>/dev/null && VDEV=/dev/$(basename "$n")
+		grep -qx "Matrox MXO2 Mini" "$n/name" 2>/dev/null && VDEV=/dev/$(basename "$n")
 	done
+	# one device for all inputs: the Input control (0 Auto, 1 HDMI, 2 Composite, 3 S-Video, 4 Component) picks HDMI
+	[ -n "$VDEV" ] && v4l2-ctl -d "$VDEV" -c input=1
 	echo "# ALSA card $CARD, video $VDEV"
 	cat /proc/asound/cards
 	grep -E '^input' $D/status

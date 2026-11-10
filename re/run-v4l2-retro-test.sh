@@ -1,22 +1,25 @@
 #!/bin/sh
-# Composite 240p at 256x240 / 320x240 / 720x240 (scaled retro widths). 240p console with colour bars connected.
+# Composite 240p at 256x240 / 320x240 (scaled retro widths). 240p console with colour bars connected.
 # Run with: sudo sh run-v4l2-retro-test.sh [extra module params, e.g. retro_left=40]
 cd "$(dirname "$0")" || exit 1
 . ./reload-driver.sh
 OUT=notes/v4l2-retro-test.txt
-D=/sys/kernel/debug/mxo2/0000:02:00.0
+. ./mxo2-env.sh
+D=/sys/kernel/debug/mxo2/$MXO2_DEV
 {
 	trap pw_restore EXIT INT TERM
 	load_driver input=1 "$@"
 	sleep 2
 	VDEV=
 	for n in /sys/class/video4linux/video*; do
-		grep -q "MXO2 Mini Composite" "$n/name" 2>/dev/null && VDEV=/dev/$(basename "$n")
+		grep -qx "Matrox MXO2 Mini" "$n/name" 2>/dev/null && VDEV=/dev/$(basename "$n")
 	done
+	# one device for all inputs: the Input control (0 Auto, 1 HDMI, 2 Composite, 3 S-Video, 4 Component) picks Composite
+	[ -n "$VDEV" ] && v4l2-ctl -d "$VDEV" -c input=2
 	grep -E '^input' $D/rx
 	echo "# frame sizes"
 	v4l2-ctl -d "$VDEV" --list-framesizes=YUYV
-	for W in 256 320 720; do
+	for W in 256 320; do
 		echo "### ${W}x240"
 		v4l2-ctl -d "$VDEV" --set-fmt-video=width=$W,height=240,pixelformat=YUYV
 		v4l2-ctl -d "$VDEV" --get-fmt-video --get-parm | grep -E 'Width|Bytes per|Size Image|Frames per'

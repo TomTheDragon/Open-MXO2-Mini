@@ -11,7 +11,8 @@
 cd "$(dirname "$0")" || exit 1
 . ./reload-driver.sh
 OUT=notes/audio-rate-test.txt
-D=/sys/kernel/debug/mxo2/0000:02:00.0
+. ./mxo2-env.sh
+D=/sys/kernel/debug/mxo2/$MXO2_DEV
 {
 	trap pw_restore EXIT INT TERM
 	load_driver

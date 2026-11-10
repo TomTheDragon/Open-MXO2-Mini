@@ -4,19 +4,20 @@
 # Output goes to notes/load-test.txt
 cd "$(dirname "$0")" || exit 1
 OUT=notes/load-test.txt
-DEV=0000:02:00.0
+. ./mxo2-env.sh
+DEV=$MXO2_DEV
 {
 	echo "# insmod"
-	insmod ../driver/mxo2.ko 2>&1
+	mxo2_insmod ../driver/mxo2.ko 2>&1
 	sleep 1
 	echo "# dmesg"
-	dmesg | grep -i -E 'mxo2|02:00.0' | tail -20
+	dmesg | grep -i -E "mxo2|${MXO2_DEV#0000:}" | tail -20
 	echo "# regs"
 	cat /sys/kernel/debug/mxo2/$DEV/regs 2>&1
 	echo "# bar1 first 256 bytes"
 	dd if=/sys/kernel/debug/mxo2/$DEV/bar1 bs=256 count=1 2>/dev/null | od -A x -t x4
 	echo "# lspci"
-	lspci -k -s 02:00.0
+	lspci -k -s "$MXO2_DEV"
 	echo "# rmmod"
 	rmmod mxo2 2>&1
 	dmesg | tail -3

@@ -2,6 +2,7 @@
 # ../driver/.
 # If the loaded mxo2 can't be unloaded because the desktop sound server (PipeWire/WirePlumber) holds
 # its ALSA card open, the user's PipeWire services are stopped for the test and restarted on exit.
+. ./mxo2-env.sh
 DRV_DIR="$(cd ../driver 2>/dev/null && pwd)"
 [ -n "$DRV_DIR" ] || { echo "ERROR: run from re/ (driver/ not found next to it)"; exit 1; }
 DRV_KO="$DRV_DIR/mxo2.ko"
@@ -41,6 +42,6 @@ load_driver() {  # extra args = module parameters
 		make -C "$DRV_DIR" >/dev/null || { echo "ERROR: build failed"; exit 1; }
 	fi
 	modprobe -a videodev videobuf2-v4l2 videobuf2-dma-sg snd snd-pcm || exit 1
-	insmod "$DRV_KO" "$@" || { echo "ERROR: insmod $DRV_KO failed"; exit 1; }
+	mxo2_insmod "$DRV_KO" "$@" || { echo "ERROR: insmod $DRV_KO failed"; exit 1; }
 	sleep 1.5
 }

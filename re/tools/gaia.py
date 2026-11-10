@@ -4,7 +4,7 @@ import os
 import struct
 import time
 
-DEFAULT_DEV = '0000:02:00.0'
+DEFAULT_DEV = None  # None: $MXO2_DEV, else the first card with PCI ID 102b:8350 (see find_dev)
 
 GPIO = 0x020
 GPOENABLE = 0x024
@@ -16,9 +16,38 @@ SRI_DATA = 0x888
 SRI_FIFO = 0x890
 
 
+def find_dev():
+    """PCI address of the card (e.g. '0000:25:00.0'): $MXO2_DEV if set, else found by PCI ID 102b:8350."""
+    if os.environ.get('MXO2_DEV'):
+        return os.environ['MXO2_DEV']
+    base = '/sys/bus/pci/devices'
+    for d in sorted(os.listdir(base)):
+        try:
+            with open(os.path.join(base, d, 'vendor')) as v, open(os.path.join(base, d, 'device')) as i:
+                if v.read().strip() == '0x102b' and i.read().strip() == '0x8350':
+                    return d
+        except OSError:
+            pass
+    raise SystemExit('no Matrox MXO2 card (PCI ID 102b:8350) found; set MXO2_DEV=0000:bb:dd.f')
+
+
+def check_lockdown():
+    """Kernel lockdown (Secure Boot on) forbids mmap of PCI BARs from user space: stop with a clear message."""
+    try:
+        with open('/sys/kernel/security/lockdown') as f:
+            mode = f.read().strip()
+    except OSError:
+        return
+    if '[none]' not in mode:
+        raise SystemExit('kernel lockdown is on (%s, Secure Boot): user-space PCI BAR access is blocked.\n'
+                         'Turn Secure Boot off (firmware setup, or sudo mokutil --disable-validation) for the '
+                         'register tools.' % mode)
+
+
 class Gaia:
     def __init__(self, dev=DEFAULT_DEV, write=False):
-        self.sys = '/sys/bus/pci/devices/' + dev
+        check_lockdown()
+        self.sys = '/sys/bus/pci/devices/' + (dev or find_dev())
         self.old_cmd = self._cmd()
         if not self.old_cmd & 2:
             self._set_cmd(self.old_cmd | 2)

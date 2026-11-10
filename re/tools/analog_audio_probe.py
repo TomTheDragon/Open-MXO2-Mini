@@ -134,8 +134,9 @@ def tone(pcm):
     return 48000 * (len(ups) - 1) / (ups[-1] - ups[0]), peak
 
 
-def setup():
-    """Card set up for composite capture as in the driver (decoder table + overrides, analog system values)."""
+def setup(mode=0):
+    """Card set up for composite capture as in the driver (decoder table + overrides, analog system values).
+    mode: ADV7181 table, 0 = NTSC composite, 3 = PAL composite."""
     shadow = load_shadow(os.path.join(HERE, '..', 'notes', 'win', 'analog', '2-preview.txt'))
     g = Gaia(write=True)
     fd = os.open(g.sys + '/resource1', os.O_RDONLY | os.O_SYNC)
@@ -149,11 +150,11 @@ def setup():
     bus = I2C(g, *BUSES['I2CCtl'])
     load_mode(bus, 0)
     bus.write(RX, 0x26, bus.read(RX, 0x26)[0] | 1)
-    load_decoder(bus, 0)
+    load_decoder(bus, mode)
     for r, v in sorted(DEFAULT.items()):
         bus.write(DEC, r, v)
     time.sleep(0.8)
-    print('decoder:%s' % dec_status(bus)[3], flush=True)
+    print('decoder mode %d:%s' % (mode, dec_status(bus)[3]), flush=True)
     g.wr(MEM_TARGET, 0)
     g.wr(VIN_CONTROL, 0x0d00)
     g.wr(VIN_CONTROL_ANALOG, 0xc0000000)

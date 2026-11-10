@@ -57,8 +57,9 @@ MODULE_PARM_DESC(rx_mode, "AD9398 mode table loaded at probe (0-11, default 10 =
 
 static int input = -1;
 module_param(input, int, 0444);
-MODULE_PARM_DESC(input, "Input the card uses while no video device captures (the audio device follows it): "
-		 "-1 = auto (default, the one with a signal, HDMI first), 0 = HDMI, 1 = composite");
+MODULE_PARM_DESC(input, "Default of the video device's Input control (the audio device follows the input): "
+		 "-1 = auto (default, the one with a signal, HDMI first, else composite), 0 = HDMI, 1 = composite, "
+		 "2 = S-video, 3 = component");
 
 static int composite_interlaced = -1;
 module_param(composite_interlaced, int, 0644);
@@ -425,12 +426,25 @@ static int dec_write_table(struct mxo2 *m, const u8 (*t)[2], size_t n)
 	return ret;
 }
 
+/* Decoder table <-> analog input: 0/3 composite, 1/4 S-video, 2/5 component (525 / 625 lines) */
+static int dec_table(int in, bool lines625)
+{
+	return in - MXO2_INPUT_COMPOSITE + (lines625 ? 3 : 0);
+}
+
+static int dec_input(int mode)
+{
+	return mode < 0 ? -1 : MXO2_INPUT_COMPOSITE + mode % 3;
+}
+
 /*
- * Load decoder mode 0 (NTSC composite) or 3 (PAL composite) as MVKAVCIO FUN_0002976c does: power up +
- * reset, 20 ms, the table, then the hidden-register script (FUN_00028f04) and our level/filter overrides.
+ * Load a decoder table (0-5) as MVKAVCIO FUN_0002976c does: power up + reset, 20 ms, the table, then the
+ * hidden-register script (FUN_00028f04: ADI SD script, component b7=1b); composite also our level/filter overrides.
  */
 static int dec_load(struct mxo2 *m, int mode)
 {
+	const struct adv7181_table *t = &adv7181_modes[mode];
+	bool composite = dec_input(mode) == MXO2_INPUT_COMPOSITE;
 	u8 pm;
 	int ret;
 
@@ -440,16 +454,24 @@ static int dec_load(struct mxo2 *m, int mode)
 	if (ret)
 		return ret;
 	msleep(20);
-	if (mode == 3)
-		ret = dec_write_table(m, adv7181_pal, ARRAY_SIZE(adv7181_pal));
-	else
-		ret = dec_write_table(m, adv7181_ntsc, ARRAY_SIZE(adv7181_ntsc));
-	if (!ret)
-		ret = dec_write_table(m, adv7181_hidden, ARRAY_SIZE(adv7181_hidden));
-	if (!ret)
+	ret = dec_write_table(m, t->regs, t->n);
+	if (!ret && dec_input(mode) == MXO2_INPUT_COMPONENT)
+		ret = dec_write_table(m, adv7181_hidden_comp, ARRAY_SIZE(adv7181_hidden_comp));
+	else if (!ret)
+		ret = dec_write_table(m, adv7181_hidden_sd, ARRAY_SIZE(adv7181_hidden_sd));
+	if (!ret && composite)
 		ret = dec_write_table(m, adv7181_overrides, ARRAY_SIZE(adv7181_overrides));
-	if (!ret)
+	if (!ret && composite)
 		ret = dec_wr(m, 0x17, m->sharpness ? 0xb3 : 0xa2);
+	/*
+	 * The Windows tables force the standard (0x00 = 0x55 / 0x85) and clear the autodetect mask 0x07, so
+	 * AD_RESULT never changes. Autodetect (PAL B/G/H/I/D, NTSC M, SECAM) with all standards enabled instead,
+	 * keeping the input select (re/notes/pal-probe3.txt: a PAL source then reads PAL B/G/H/I/D).
+	 */
+	if (!ret)
+		ret = dec_wr(m, 0x07, 0x7f);
+	if (!ret)
+		ret = dec_wr(m, 0x00, 0x10 | (t->regs[0][1] & 0x0f));         /* table entry 0 = reg 0x00 */
 	m->dec_mode = ret ? -1 : mode;
 	return ret;
 }
@@ -463,7 +485,7 @@ void mxo2_set_sharpness(struct mxo2 *m, int val)
 {
 	mutex_lock(&m->rx_lock);
 	m->sharpness = val;
-	if (m->dec_mode >= 0)
+	if (dec_input(m->dec_mode) == MXO2_INPUT_COMPOSITE)
 		dec_wr(m, 0x17, val ? 0xb3 : 0xa2);
 	mutex_unlock(&m->rx_lock);
 }
@@ -479,15 +501,23 @@ static int dec_power_down(struct mxo2 *m)
 	return ret;
 }
 
+/* AD_RESULT (Status1 bits 6:4) names */
+static const char *const dec_std_names[8] = {
+	"NTSC M/J", "NTSC 4.43", "PAL M", "PAL 60", "PAL B/G/H/I/D", "SECAM", "PAL Comb N", "SECAM 525",
+};
+
 /*
- * Analog format from the decoder status: standard (AD_RESULT, Status1 bits 6:4: 4 PAL B/G/H/I/D, 5 SECAM,
- * 6 PAL N are 50 Hz) picks the table; Status3 bit 6 clear = no field sequence = 240p/288p (game consoles),
- * captured as one packed field per frame. The card stores 243 (NTSC) lines per field; we deliver 240/480.
+ * Analog format from the decoder status. AD_RESULT (Status1 bits 6:4) gives two things: the line system
+ * (4 PAL B/G/H/I/D, 5 SECAM, 6 PAL N = 625 lines / 50 Hz, the rest 525 / 60 Hz) and the colour system, which
+ * picks the decoder table (PAL colour, incl. PAL 60 / PAL M, and SECAM: table 3; NTSC: table 0). The decoder
+ * runs in autodetect, so it decodes the colour itself; the table brings the matching filters and gains.
+ * Status3 bit 6 clear = no field sequence = 240p/288p (game consoles), captured as one packed field per frame.
+ * The card stores 243 (NTSC) lines per field; we deliver 240/480.
  */
 static void dec_detect_locked(struct mxo2 *m)
 {
 	u32 w = 0, h = 0, fps = 0;
-	bool il = false, pal = false;
+	bool il = false, pal = false, pal_colour;
 	u8 s1 = 0, s3 = 0;
 	int std, want;
 
@@ -501,7 +531,9 @@ static void dec_detect_locked(struct mxo2 *m)
 		goto out;
 	std = (s1 >> 4) & 7;
 	pal = std == 4 || std == 5 || std == 6;
-	want = pal ? 3 : 0;
+	pal_colour = std != 0 && std != 1 && std != 7;
+	/* component has no colour subcarrier: the table follows the line system */
+	want = dec_table(m->input, m->input == MXO2_INPUT_COMPONENT ? pal : pal_colour);
 	if (want == m->dec_mode) {
 		m->dec_want = want;
 	} else if (want != m->dec_want) {
@@ -513,8 +545,8 @@ static void dec_detect_locked(struct mxo2 *m)
 		goto out;
 	} else {
 		if (!dec_load(m, want))
-			dev_info(&m->pdev->dev, "ADV7181: %s detected, decoder mode %d loaded\n",
-				 pal ? "50 Hz" : "60 Hz", want);
+			dev_info(&m->pdev->dev, "ADV7181: %s detected (%s), decoder mode %d loaded\n",
+				 dec_std_names[std], pal ? "50 Hz" : "60 Hz", want);
 		goto out;               /* format again next round, after the decoder settled */
 	}
 	il = composite_interlaced < 0 ? !!(s3 & BIT(6)) : !!composite_interlaced;
@@ -527,7 +559,8 @@ static void dec_detect_locked(struct mxo2 *m)
 	}
 out:
 	if (w != m->in_width || h != m->in_height || fps != m->in_fps || il != m->in_interlaced)
-		dev_info(&m->pdev->dev, "composite input: %ux%u%s @ %u fps (decoder status %02x/%02x)\n",
+		dev_info(&m->pdev->dev, "%s input: %ux%u%s @ %u fps (decoder status %02x/%02x)\n",
+			 mxo2_input_names[m->input],
 			 w, h, il ? "i" : "p", fps, s1, s3);
 	m->in_width = w;
 	m->in_height = h;
@@ -538,7 +571,7 @@ out:
 	m->in_wide = false;
 	m->in_table = -1;
 	m->in_pixel_rep = 1;
-	m->sig[MXO2_INPUT_COMPOSITE] = (struct mxo2_sig){ .width = w, .height = h, .fps = fps, .interlaced = il };
+	m->sig[m->input] = (struct mxo2_sig){ .width = w, .height = h, .fps = fps, .interlaced = il };
 	m->in_audio_rate = 0;   /* analog audio: no rate detection, 48 kHz */
 	m->in_n = 0;
 	m->in_cts = 0;
@@ -557,14 +590,14 @@ int mxo2_select_input(struct mxo2 *m, int in)
 	if (in < 0 || in >= MXO2_NUM_INPUTS)
 		return -EINVAL;
 	mutex_lock(&m->rx_lock);
-	if (in == m->input && (in == MXO2_INPUT_HDMI || m->dec_mode >= 0))
+	if (in == m->input && (in == MXO2_INPUT_HDMI || dec_input(m->dec_mode) == in))
 		goto out;
-	if (in == MXO2_INPUT_COMPOSITE) {
+	if (in != MXO2_INPUT_HDMI) {
 		/* both chips stay on while idle (mxo2_input_power powers the unused one down for a capture) */
 		int i;
 
-		if (m->dec_mode < 0)
-			ret = dec_load(m, 0);
+		if (dec_input(m->dec_mode) != in)
+			ret = dec_load(m, dec_table(in, false));
 		for (i = 0; !ret && i < 20; i++) {      /* wait up to 1 s for the decoder to lock */
 			u8 s1;
 
@@ -603,7 +636,7 @@ int mxo2_select_input(struct mxo2 *m, int in)
 			msleep(100);
 		}
 	}
-	dev_info(&m->pdev->dev, "input %s selected\n", in == MXO2_INPUT_HDMI ? "HDMI" : "composite");
+	dev_info(&m->pdev->dev, "input %s selected\n", mxo2_input_names[in]);
 out:
 	mutex_unlock(&m->rx_lock);
 	return ret;
@@ -659,7 +692,7 @@ static int auto_pick_locked(struct mxo2 *m)
 	if (m->rx_mode >= 0 && !rx_rd(m, AD9398_STATUS1, &st1) && st1 == 0x67)
 		return MXO2_INPUT_HDMI;
 	if (m->dec_mode >= 0 && !dec_rd(m, ADV7181_STATUS1, &s1) && s1 != 0xff && (s1 & BIT(0)))
-		return MXO2_INPUT_COMPOSITE;
+		return dec_input(m->dec_mode);
 	return -1;
 }
 
@@ -667,8 +700,8 @@ static int auto_pick_locked(struct mxo2 *m)
 static void monitor_hdmi_locked(struct mxo2 *m);
 
 /*
- * The input that is not selected, seen while idle (both chips on): its signal for the other video device's format
- * list, without touching the selected input's state.
+ * The input that is not selected, seen while idle (both chips on): its signal for Auto and the V4L2 input status,
+ * without touching the selected input's state.
  */
 static void hdmi_probe_locked(struct mxo2 *m)
 {
@@ -725,10 +758,11 @@ static void dec_probe_locked(struct mxo2 *m)
 		sig.fps *= 2;
 	}
 out:
-	m->sig[MXO2_INPUT_COMPOSITE] = sig;
+	if (m->dec_mode >= 0)
+		m->sig[dec_input(m->dec_mode)] = sig;
 }
 
-/* V4L2 input "Auto" selected: switch now (no waiting for the monitor) if the other input has the signal. */
+/* Input control changed: switch now (no waiting for the monitor) to the fixed input, or for Auto to the one with a signal. */
 int mxo2_auto_input_now(struct mxo2 *m)
 {
 	int pick;
@@ -777,7 +811,7 @@ void mxo2_rx_monitor(struct mxo2 *m)
 	if (want >= 0) {
 		m->auto_count = 0;
 		if (!mxo2_switch_input(m, want))
-			dev_info(&m->pdev->dev, "input: switched to %s (%s)\n", want ? "composite" : "HDMI",
+			dev_info(&m->pdev->dev, "input: switched to %s (%s)\n", mxo2_input_names[want],
 				 m->input_pref < 0 ? "auto, signal there" : "Input control");
 	}
 }
@@ -843,9 +877,10 @@ static int rx_show(struct seq_file *s, void *unused)
 		   m->in_table, m->in_wide ? "16:9" : "4:3");
 	seq_printf(s, "audio %u Hz (channel status %u, clock regeneration %u; N %u CTS %u)\n",
 		   m->in_audio_rate, m->in_rate_cs, m->in_rate_cts, m->in_n, m->in_cts);
-	seq_printf(s, "input %s%s%s, ADV7181 mode %d, Status1 %02x Status3 %02x\n",
-		   m->input == MXO2_INPUT_HDMI ? "HDMI" : "composite", m->input_pref < 0 ? " (auto)" : "",
-		   m->input_locked ? " (set by an app)" : "", m->dec_mode, m->dec_status1, m->dec_status3);
+	seq_printf(s, "input %s%s%s, ADV7181 mode %d, Status1 %02x (%s) Status3 %02x\n",
+		   mxo2_input_names[m->input], m->input_pref < 0 ? " (auto)" : "",
+		   m->input_locked ? " (set by an app)" : "", m->dec_mode, m->dec_status1,
+		   dec_std_names[(m->dec_status1 >> 4) & 7], m->dec_status3);
 	return 0;
 }
 

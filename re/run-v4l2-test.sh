@@ -1,19 +1,22 @@
 #!/bin/sh
-# V4L2 device test (HDMI source on). Needs v4l-utils: sudo apt install v4l-utils
+# V4L2 device test (HDMI source on). Needs v4l-utils: sudo dnf install v4l-utils, or apt install v4l-utils
 # Run with: sudo sh run-v4l2-test.sh
 cd "$(dirname "$0")" || exit 1
 OUT=notes/v4l2-test.txt
-D=/sys/kernel/debug/mxo2/0000:02:00.0
-command -v v4l2-ctl >/dev/null || { echo "v4l2-ctl missing: sudo apt install v4l-utils"; exit 1; }
+. ./mxo2-env.sh
+D=/sys/kernel/debug/mxo2/$MXO2_DEV
+command -v v4l2-ctl >/dev/null || { echo "v4l2-ctl missing: sudo dnf install v4l-utils, or apt install v4l-utils"; exit 1; }
 {
 	rmmod mxo2 2>/dev/null
 	modprobe -a videodev videobuf2-v4l2 videobuf2-dma-sg || exit 1
-	insmod ../driver/mxo2.ko || exit 1
+	mxo2_insmod ../driver/mxo2.ko || exit 1
 	sleep 1
 	DEV=
 	for n in /sys/class/video4linux/video*; do
-		grep -q "MXO2 Mini HDMI" "$n/name" 2>/dev/null && DEV=/dev/$(basename "$n")
+		grep -qx "Matrox MXO2 Mini" "$n/name" 2>/dev/null && DEV=/dev/$(basename "$n")
 	done
+	# one device for all inputs: the Input control (0 Auto, 1 HDMI, 2 Composite, 3 S-Video, 4 Component) picks HDMI
+	[ -n "$DEV" ] && v4l2-ctl -d "$DEV" -c input=1
 	echo "# device: $DEV"
 	[ -n "$DEV" ] || { dmesg | tail -10; rmmod mxo2; exit 1; }
 	echo "# v4l2-ctl --all"

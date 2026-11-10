@@ -41,6 +41,7 @@
 #define WDMA_CTL_CAPTURE   0x82000000 /* Windows value, 1080p YUYV 8-bit */
 #define WDMA_CTL2_VALUE    0x00000041 /* bit 6: source = HDMI */
 #define WDMA_CTL2_ANALOG   0x00000101 /* bit 8 (+ bit 0): source = analog decoder (Windows composite) */
+#define WDMA_CTL2_625      0x00000010 /* bit 4: 625-line / 50 Hz analog timing (Windows PAL, re/notes/pal-probe3.txt) */
 #define VIN_CONTROL_HDMI   0x00000d02 /* bits 1:0 = 2: HDMI selected */
 #define VIN_CONTROL_OFF    0x00000d00
 #define DMA_CMD_FLAGS      0x10000000
@@ -65,6 +66,16 @@ static int vin_code = 0x0d;
 module_param(vin_code, int, 0644);
 MODULE_PARM_DESC(vin_code, "VinControl mode code (bits 12:8) while capturing (default 0x0d, worked for 720p-1080p/i; "
 		 "experiment: 0x10 480i, 0x11 576i, 0x12 480p, 0x13 576p; never 0x03 - stops capture)");
+
+/*
+ * PAL 288p (progressive console on a 625-line decoder): the card stores every other field one line lower
+ * (re/notes/pal-wobble-pal50.txt). InterruptStatus0 bit 24, read right after the field landed, tells them
+ * apart: 0 = the lower one (re/notes/pal-probe6.txt, 80/80 fields); its copy starts one line later.
+ */
+static int pal_field_fix = 1;
+module_param(pal_field_fix, int, 0644);
+MODULE_PARM_DESC(pal_field_fix, "Composite PAL 288p: align the alternating fields (1 = on, default; "
+		 "-1 = inverted flag; 0 = off)");
 
 static int analog_field_swap;
 module_param(analog_field_swap, int, 0644);
@@ -102,13 +113,13 @@ static const struct { u16 off; u32 val; } windows_values[] = {
 };
 
 /*
- * Register values that differ between the Windows HDMI and composite captures (re/notes/win-regshadow*.txt).
- * Index 0 = HDMI, 1 = analog.
+ * Register values that differ between the Windows HDMI and composite captures (re/notes/win-regshadow*.txt,
+ * re/notes/win/pal/). Index 0 = HDMI, 1 = analog NTSC, 2 = analog PAL.
  */
-static const struct { u16 off; u32 val[2]; } input_values[] = {
-	{ GAIA_GENLOCK_CONTROL, { 0x00000401, 0x00001000 } },
-	{ GAIA_SYSTEM_CLOCK_RELOAD, { 0x000184e8, 0x00008f48 } },
-	{ GAIA_CLOCK_LOAD_COUNT, { 0x0004b87f, 0x00037176 } },
+static const struct { u16 off; u32 val[3]; } input_values[] = {
+	{ GAIA_GENLOCK_CONTROL, { 0x00000401, 0x00001000, 0x00001101 } },
+	{ GAIA_SYSTEM_CLOCK_RELOAD, { 0x000184e8, 0x00008f48, 0x0000f988 } },
+	{ GAIA_CLOCK_LOAD_COUNT, { 0x0004b87f, 0x00037176, 0x00042060 } },
 };
 
 static void gaia_setup(struct mxo2 *m)
@@ -390,8 +401,9 @@ static bool wait_ts_change(struct mxo2 *m, u32 *ts)
 /* VideoWDmaControl2 for the running capture: source select, line length in dwords for analog/weave */
 static u32 wdma_ctl2(struct mxo2 *m, bool with_width)
 {
-	if (m->cap_analog)      /* Windows: 0x01680101 for both; also packs 240p fields with Control bit 25 */
-		return WDMA_CTL2_ANALOG | ((m->cap_line_bytes / 4) & 0x7ff) << 16;
+	if (m->cap_analog)      /* Windows: 0x01680101 NTSC / 0x01680111 PAL; packs 240p fields with Control bit 25 */
+		return WDMA_CTL2_ANALOG | (m->cap_pal ? WDMA_CTL2_625 : 0) |
+		       ((m->cap_line_bytes / 4) & 0x7ff) << 16;
 	return WDMA_CTL2_VALUE | (with_width ? ((m->cap_line_bytes / 4) & 0x7ff) << 16 : 0);
 }
 
@@ -446,6 +458,12 @@ int mxo2_dma_to_host(struct mxo2 *m, u32 onboard, dma_addr_t sg_dma, unsigned in
 	return 0;
 }
 
+/* Card address of a finished slot's first delivered line */
+u32 mxo2_slot_offset(struct mxo2 *m, unsigned int slot)
+{
+	return slot * MXO2_FRAME_BYTES + m->cap_skip + m->slot_skip[slot];
+}
+
 /* debugfs test path: copy into the non-latest host buffer and publish it */
 static void hbuf_frame(struct mxo2 *m, unsigned int slot, u32 ts, u64 seq)
 {
@@ -455,7 +473,7 @@ static void hbuf_frame(struct mxo2 *m, unsigned int slot, u32 ts, u64 seq)
 	target = m->latest == 0 ? 1 : 0;
 	b = &m->hbuf[target];
 	mxo2_hbuf_sync(m, b, false);
-	if (!mxo2_dma_to_host(m, slot * MXO2_FRAME_BYTES + m->cap_skip, b->sg_dma, b->sg_entries,
+	if (!mxo2_dma_to_host(m, mxo2_slot_offset(m, slot), b->sg_dma, b->sg_entries,
 			      m->cap_analog ? m->cap_line_bytes / 4 : 1920 * 2 / 4)) {
 		mxo2_hbuf_sync(m, b, true);
 		b->ts = ts;
@@ -500,6 +518,12 @@ static void capture_loop_progressive(struct mxo2 *m)
 			continue;
 		}
 		m->stats.ts_changes++;
+		if (m->cap_pal) {               /* field flag before re-arming, as probe 6 read it */
+			int fix = READ_ONCE(pal_field_fix);
+			bool lower = !(mxo2_rd(m, GAIA_INTERRUPT_STATUS0) & INT_STICKY) ^ (fix < 0);
+
+			m->slot_skip[n % MXO2_ONBOARD_SLOTS] = fix && lower ? m->cap_line_bytes : 0;
+		}
 		n++;
 		arm_slot(m, n % MXO2_ONBOARD_SLOTS);   /* slot for the next frame */
 		if (n >= 2)
@@ -657,18 +681,24 @@ static int thread_start(struct mxo2 *m)
 	m->stats.started_ns = ktime_get_ns();
 	m->cap_interlaced = mxo2_cap_weave(m);  /* fixed until the thread stops */
 	m->cap_analog = m->input != MXO2_INPUT_HDMI;
+	m->cap_pal = m->cap_analog && m->in_vtotal == 625;
 	m->cap_line_bytes = (m->in_width ? m->in_width : m->cap_analog ? 720 : 1920) * 2;
 	/*
 	 * NTSC composite: the card stores 243 lines per field (486 per frame, re/notes/analog-probe5.txt);
 	 * deliver 240 / 480 by skipping the first 2 / 4 lines (an even count keeps the field parity).
+	 * PAL: 288 lines per packed field, 287 per woven field (574 rows; re/notes/pal-probe3.txt), no skip.
 	 */
 	m->cap_skip = 0;
+	memset(m->slot_skip, 0, sizeof(m->slot_skip));
 	if (m->cap_analog && (m->in_height == 480 || m->in_height == 240))
 		m->cap_skip = (m->cap_interlaced ? 4 : 2) * m->cap_line_bytes;
 	mxo2_audio_reset(m);
 	for (i = 0; i < ARRAY_SIZE(input_values); i++)
-		mxo2_wr(m, input_values[i].off, input_values[i].val[m->cap_analog]);
+		mxo2_wr(m, input_values[i].off, input_values[i].val[m->cap_analog ? 1 + m->cap_pal : 0]);
 	mxo2_wr(m, GAIA_VIDEO_WDMA_CONTROL, 0);
+	/* bit 16: component data layout (Windows MVKAVBUS FUN_0002bf54; without it Cb/Cr swap and the picture
+	 * shifts, re/notes/comp-probe.txt) */
+	mxo2_wr(m, GAIA_VIN_CONTROL_ANALOG, m->input == MXO2_INPUT_COMPONENT ? 0xc0010000 : 0xc0000000);
 	mxo2_wr(m, GAIA_VIDEO_WDMA_CONTROL2, wdma_ctl2(m, false));
 	/* VinControl bits 1:0 = 2 HDMI, 0 analog (MVKAVBUS FUN_0002bf54) */
 	mxo2_wr(m, GAIA_VIN_CONTROL, ((m->cap_analog ? VIN_CONTROL_OFF : VIN_CONTROL_HDMI) & ~0x1f00) |
@@ -726,6 +756,7 @@ static bool cap_mode_stale(struct mxo2 *m)
 	bool analog = m->input != MXO2_INPUT_HDMI;
 
 	return m->cap_analog != analog || m->cap_interlaced != mxo2_cap_weave(m) ||
+	       m->cap_pal != (analog && m->in_vtotal == 625) ||
 	       m->cap_line_bytes != (m->in_width ? m->in_width : analog ? 720 : 1920) * 2;
 }
 
@@ -849,7 +880,7 @@ void mxo2_capture_resume(struct mxo2 *m)
 		dev_err(&m->pdev->dev, "capture restart after resume failed\n");
 	m->resume_capture = false;
 	mutex_unlock(&m->cap_lock);
-	dev_info(&m->pdev->dev, "resumed, input %s\n", m->input == MXO2_INPUT_HDMI ? "HDMI" : "composite");
+	dev_info(&m->pdev->dev, "resumed, input %s\n", mxo2_input_names[m->input]);
 }
 
 void mxo2_capture_stop_all(struct mxo2 *m)
@@ -937,7 +968,7 @@ static int status_show(struct seq_file *s, void *unused)
 	seq_printf(s, "field period   %u ns (vsync interrupts), audio layout %u B/sample\n", m->field_ns,
 		   m->audio.frame_bytes);
 	seq_printf(s, "input          %s %ux%u%s @ %u fps, VIC %u%s%s\n",
-		   m->input == MXO2_INPUT_HDMI ? "HDMI" : "composite", m->in_width, m->in_height,
+		   mxo2_input_names[m->input], m->in_width, m->in_height,
 		   m->in_interlaced ? "i" : "p", m->in_fps, m->in_vic,
 		   m->cap_thread && m->cap_analog ? " (capturing analog)" : "",
 		   m->cap_thread && m->cap_interlaced ? " (capturing woven fields)" : "");

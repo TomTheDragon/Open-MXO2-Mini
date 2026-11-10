@@ -3,7 +3,9 @@
 cd "$(dirname "$0")"
 VER=$(sed -n 's/^PACKAGE_VERSION="\(.*\)"/\1/p' dkms.conf)
 [ "$(id -u)" = 0 ] || { echo "run with sudo"; exit 1; }
-rmmod mxo2 2>/dev/null
+. ./mxo2-unload.sh
+trap mxo2_pw_restart EXIT
+mxo2_unload || exit 1
 dkms remove -m mxo2 -v "$VER" --all 2>/dev/null
 rm -rf "/usr/src/mxo2-$VER"
 rm -f /etc/wireplumber/wireplumber.conf.d/51-mxo2.conf

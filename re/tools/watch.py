@@ -2,7 +2,7 @@
 """Watch read-only/RW Gaia registers and print every change (read-only, run as root).
 
 Plug and unplug video sources while it runs. Ctrl+C to stop.
-    sudo python3 -I watch.py [seconds] [0000:02:00.0]
+    sudo python3 -I watch.py [seconds] [PCI address, default: found by ID]
 """
 import mmap
 import os
@@ -11,7 +11,10 @@ import sys
 import time
 
 SECS = float(sys.argv[1]) if len(sys.argv) > 1 else 120
-DEV = sys.argv[2] if len(sys.argv) > 2 else '0000:02:00.0'
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from gaia import check_lockdown, find_dev  # noqa: E402
+
+DEV = sys.argv[2] if len(sys.argv) > 2 else find_dev()
 SYS = '/sys/bus/pci/devices/' + DEV
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -35,6 +38,7 @@ def readable():
 
 
 def main():
+    check_lockdown()
     with open(SYS + '/config', 'r+b') as f:
         f.seek(4)
         old = struct.unpack('<H', f.read(2))[0]

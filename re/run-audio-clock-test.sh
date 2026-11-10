@@ -7,7 +7,8 @@
 cd "$(dirname "$0")" || exit 1
 . ./reload-driver.sh
 OUT=notes/audio-clock-test.txt
-D=/sys/kernel/debug/mxo2/0000:02:00.0
+. ./mxo2-env.sh
+D=/sys/kernel/debug/mxo2/$MXO2_DEV
 run() {  # $1 = label, rest = module parameters
 	L=$1; shift
 	echo "######## $L: $*"

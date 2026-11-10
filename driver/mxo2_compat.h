@@ -25,4 +25,9 @@
 #define MXO2_VB2_WAIT_OPS
 #endif
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 3, 0)
+#define vm_flags_set(vma, f) ((vma)->vm_flags |= (f))
+#define vm_flags_clear(vma, f) ((vma)->vm_flags &= ~(f))
+#endif
+
 #endif

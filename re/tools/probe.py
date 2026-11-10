@@ -5,14 +5,17 @@ Must run as root. Reads PCI config space and dumps BAR0 (registers) and the
 start of BAR1. Nothing is written to the card except temporarily turning on
 memory decoding in the PCI command register (restored afterwards).
 
-Usage: sudo python3 -I probe.py [0000:02:00.0] > probe.txt
+Usage: sudo python3 -I probe.py [PCI address, default: found by ID] > probe.txt
 """
 import mmap
 import os
 import struct
 import sys
 
-DEV = sys.argv[1] if len(sys.argv) > 1 else '0000:02:00.0'
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from gaia import check_lockdown, find_dev  # noqa: E402
+
+DEV = sys.argv[1] if len(sys.argv) > 1 else find_dev()
 SYS = '/sys/bus/pci/devices/' + DEV
 HERE = os.path.dirname(os.path.abspath(__file__))
 REGS = os.path.join(HERE, '..', 'notes', 'gaia.regs')
@@ -56,6 +59,7 @@ def dump_bar(idx, length):
 
 
 def main():
+    check_lockdown()
     c = cfg()
     print('# device %s' % DEV)
     print('# config space (%d bytes):' % len(c))

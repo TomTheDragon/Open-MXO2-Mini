@@ -4,13 +4,16 @@
 cd "$(dirname "$0")" || exit 1
 . ./reload-driver.sh
 OUT=notes/v4l2-analog-test.txt
-D=/sys/kernel/debug/mxo2/0000:02:00.0
+. ./mxo2-env.sh
+D=/sys/kernel/debug/mxo2/$MXO2_DEV
 
 find_vdev() {
 	VDEV=
 	for n in /sys/class/video4linux/video*; do
-		grep -q "MXO2 Mini Composite" "$n/name" 2>/dev/null && VDEV=/dev/$(basename "$n")
+		grep -qx "Matrox MXO2 Mini" "$n/name" 2>/dev/null && VDEV=/dev/$(basename "$n")
 	done
+	# one device for all inputs: the Input control (0 Auto, 1 HDMI, 2 Composite, 3 S-Video, 4 Component)
+	[ -n "$VDEV" ] && v4l2-ctl -d "$VDEV" -c input=2
 }
 
 # $1 = name: stream 100 frames, save one frame -> notes/analog-$1.raw/png, bar levels, comb ratio
@@ -46,20 +49,19 @@ print('comb ratio %.3f (woven fields ok < 1, swapped > 1; progressive ~0.7)' % (
 
 {
 	trap pw_restore EXIT INT TERM
-	echo "### A: input=1, scan auto (240p console expected: 720x240 @ 60)"
+	echo "### A: input=1, scan auto (240p console expected: 720x480 line-doubled, Field None @ 60)"
 	load_driver input=1 "$@"
 	sleep 2
 	find_vdev
 	grep -E '^(input|locked)' $D/rx
 	grab 240p
-	echo "### device switching: stream the HDMI device briefly, then composite again"
-	HDEV=
-	for n in /sys/class/video4linux/video*; do
-		grep -q "MXO2 Mini HDMI" "$n/name" 2>/dev/null && HDEV=/dev/$(basename "$n")
-	done
-	timeout 10 v4l2-ctl -d "$HDEV" --stream-mmap=4 --stream-count=10 2>&1 | tr -d '<' | grep -c fps
+	echo "### input switching: stream HDMI briefly (Input control), then composite again (S_INPUT)"
+	v4l2-ctl -d "$VDEV" -c input=1
+	v4l2-ctl -d "$VDEV" --get-input --get-fmt-video | grep -E 'Input|Width'
+	timeout 10 v4l2-ctl -d "$VDEV" --stream-mmap=4 --stream-count=10 2>&1 | tr -d '<' | grep -c fps
 	grep -E '^input' $D/rx
-	timeout 10 v4l2-ctl -d "$VDEV" --stream-mmap=4 --stream-count=30 2>&1 | tr -d '<' | grep fps | tail -1
+	v4l2-ctl -d "$VDEV" -c input=2
+	timeout 10 v4l2-ctl -d "$VDEV" -i 1 --stream-mmap=4 --stream-count=30 2>&1 | tr -d '<' | grep fps | tail -1
 	grep -E '^input' $D/rx
 	echo "### v4l2-compliance (composite)"
 	v4l2-compliance -d "$VDEV" -s 2>&1 | grep -E 'fail|Total'

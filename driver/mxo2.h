@@ -52,7 +52,10 @@ struct mxo2_stats {
 struct snd_pcm_substream;
 struct mxo2;
 
-enum { MXO2_INPUT_HDMI, MXO2_INPUT_COMPOSITE, MXO2_NUM_INPUTS };
+/* Inputs (V4L2 inputs 0-3 of the one video device). The analog ones share the ADV7181 decoder: table = input - 1 (525 lines), +3 (625). */
+enum { MXO2_INPUT_HDMI, MXO2_INPUT_COMPOSITE, MXO2_INPUT_SVIDEO, MXO2_INPUT_COMPONENT, MXO2_NUM_INPUTS };
+extern const char *const mxo2_input_names[MXO2_NUM_INPUTS];
+#define MXO2_CID_INPUT (V4L2_CID_USER_BASE + 0x1f00) /* "Input" menu: 0 Auto, 1 + MXO2_INPUT_* */
 
 /* Signal detected on one input (mxo2_rx.c); width 0 = none. */
 struct mxo2_sig {
@@ -61,10 +64,9 @@ struct mxo2_sig {
 	bool wide;              /* SD picture aspect 16:9 */
 };
 
-/* One V4L2 capture device (/dev/videoN) = one input of the card. */
+/* The V4L2 capture device (/dev/videoN); it captures from the card's selected input (m->input). */
 struct mxo2_vid {
 	struct mxo2 *m;
-	int input;              /* MXO2_INPUT_* */
 	struct video_device vdev;
 	struct vb2_queue queue;
 	struct mutex lock;      /* serialises ioctls and the vb2 queue */
@@ -72,8 +74,11 @@ struct mxo2_vid {
 	struct list_head buf_list; /* queued buffers waiting for a frame */
 	u32 width, height;      /* format of the current / next stream */
 	bool fmt_interlaced;    /* ... woven frames */
-	bool pal;               /* composite: last signal was 50 Hz (sizes 576/288) */
-	u32 req_width, req_height; /* composite: requested size (S_FMT), 0 = the signal's own size */
+	bool pal;               /* analog: last signal was 50 Hz (sizes 576/288) */
+	u32 req_width, req_height; /* analog: requested size (S_FMT), 0 = the signal's own size */
+	u32 hdmi_width, hdmi_height; /* HDMI: last detected size, used while there is no signal (1080p at first) */
+	bool hdmi_interlaced;
+	int fmt_input;          /* input the current format was made for */
 	u32 sequence;
 	bool line_double;       /* composite 240p/288p delivered as 480/576 lines: each line twice */
 	bool use_bounce;        /* frames go through `bounce` (scaled width or line doubling) */
@@ -81,6 +86,7 @@ struct mxo2_vid {
 	struct mxo2_hbuf bounce;     /* ... and its 720-wide source field */
 	u8 *linebuf;            /* one filtered 720-sample line (bounce path) */
 	struct v4l2_ctrl_handler ctrl;
+	struct v4l2_ctrl *input_ctrl;   /* "Input" menu: Auto, then MXO2_INPUT_* + 1 */
 };
 
 /* Horizontal area-average tap: source samples k0..k0+n-1 with weights w (1/256 sample units). */
@@ -140,7 +146,9 @@ struct mxo2 {
 	bool cap_interlaced;    /* the running thread weaves fields (fixed while it runs) */
 	u32 cap_line_bytes;     /* line pitch for weaving = input width * 2 (fixed while it runs) */
 	bool cap_analog;        /* capturing from the ADV7181 decoder (fixed while it runs) */
+	bool cap_pal;           /* analog 625-line / 50 Hz timing (fixed while it runs) */
 	u32 cap_skip;           /* bytes skipped at the start of an on-board frame (analog: extra lines) */
+	u32 slot_skip[MXO2_ONBOARD_SLOTS]; /* extra bytes skipped per slot (PAL 288p lower fields) */
 	struct mxo2_hbuf hbuf[MXO2_HOST_BUFS];
 	struct mutex frame_lock; /* protects `latest` and the buffer contents vs. readers */
 	int latest;             /* index of the newest complete host buffer, -1 = none */
@@ -171,7 +179,7 @@ struct mxo2 {
 	bool input_locked;      /* ... except after VIDIOC_S_INPUT, until the device is closed */
 	int auto_want, auto_count; /* candidate input and how many monitor rounds in a row it was seen */
 	bool resume_capture;    /* the capture thread ran when the system suspended */
-	int dec_mode;           /* loaded decoder table: 0 NTSC, 3 PAL, -1 none */
+	int dec_mode;           /* loaded decoder table 0-5 (composite / S-video / component, +3 = 625 lines), -1 none */
 	int dec_want;           /* table the status asks for; loaded once that held for 400 ms */
 	unsigned long dec_want_since;
 	u8 dec_status1, dec_status3;
@@ -190,11 +198,11 @@ struct mxo2 {
 	u32 in_rate_cs, in_rate_cts; /* from channel status / from clock regeneration */
 	bool in_rate_warned;
 
-	/* V4L2 (mxo2_v4l2.c): one video device per input; only one captures at a time */
+	/* V4L2 (mxo2_v4l2.c): one video device for all inputs */
 	struct v4l2_device v4l2_dev;
-	struct mxo2_vid vid[MXO2_NUM_INPUTS];
-	struct mxo2_vid *streaming;     /* the device whose stream owns the capture, NULL = none */
-	struct mxo2_sig sig[MXO2_NUM_INPUTS]; /* detected signal per input (also the inactive one while idle) */
+	struct mxo2_vid vid;
+	struct mxo2_vid *streaming;     /* &vid while its stream owns the capture, NULL = none */
+	struct mxo2_sig sig[MXO2_NUM_INPUTS]; /* detected signal per input (inactive ones probed while idle) */
 	int sharpness;          /* composite: 0 decoder notch, 1 wide band + subcarrier filter, 2 wide band */
 	struct workqueue_struct *fix_wq; /* ordered: chroma fix + buffer completion */
 
@@ -232,6 +240,7 @@ int mxo2_capture_get(struct mxo2 *m, unsigned int user);
 void mxo2_capture_put(struct mxo2 *m, unsigned int user);
 void mxo2_capture_stop_all(struct mxo2 *m);
 /* PCI DMA of `onboard` (byte address in card memory) to host; width = PitchRes field in dwords */
+u32 mxo2_slot_offset(struct mxo2 *m, unsigned int slot);
 int mxo2_dma_to_host(struct mxo2 *m, u32 onboard, dma_addr_t sg_dma, unsigned int sg_entries,
 		     u32 width);
 int mxo2_hbuf_alloc(struct mxo2 *m, struct mxo2_hbuf *b, u32 bytes);

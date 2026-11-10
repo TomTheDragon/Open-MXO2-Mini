@@ -1123,3 +1123,190 @@ text in `notes/datasheet/AD9398.txt`)
 - Project renamed **Open-MXO2-Mini** (folder, README, packages `open-mxo2-mini-dkms`, tarball
   `open-mxo2-mini-<version>.tar.gz`). Kept: kernel module / DKMS name `mxo2` (/usr/src/mxo2-<version>), ALSA card
   "MXO2 Mini", PipeWire node names v4l2_input.mxo2-mini-hdmi / -composite (existing OBS sources keep working).
+
+### PAL composite (2026-11-05)
+- Untested so far: field lines (driver assumes 288, no skip), decoder levels with the NTSC-tuned overrides, 256/320
+  crop centre (864 samples/line, NTSC centre), audio 1920 samples per two fields.
+- Built: `run-pal-probe.sh` → `tools/pal_probe.py` (ADV7181 mode 3 + overrides): decoder status/standard/interlace
+  flag, field rate, rows written for a packed field and a woven frame, picture extent (content rows/columns) →
+  `notes/pal/field.png`, `frame.png`. `analog_audio_probe.setup(mode)` now takes the decoder table.
+- PAL probe 1 (`notes/pal-probe.txt`, PAL SNES): forced PAL table → AD_RESULT stays "NTSC M/J" (no autodetect with
+  a forced standard - the driver's 50/60 Hz choice relies on it!), Status3 0x8d (bit 7 PAL swinging-burst lock,
+  bit 2 50 Hz output), 243 lines per field, 75 fields/s, images = sync garbage (dotted diagonals).
+  NTSC vs PAL Windows tables differ only in 0x00 (0x55 NTSC-M / 0x85 PAL-B/G forced), 0x17, 0x19 (fd/f1), 0x2e/0x30.
+  VinControl code: Windows mode table says 0x11 = 576i, 0x10 = 480i (we always use 0x0d = 1080p50 code).
+- Built: `run-pal-probe2.sh` → `tools/pal_probe2.py`: 0x00 ∈ {05 auto NTSC-J, 15 auto NTSC-M, 85 PAL, 65 PAL60,
+  55 NTSC-M} × VinControl code {0x0d, 0x11}: AD_RESULT, Status1/3, field rate, rows, extent, colour, images
+  `notes/pal/p2-<00>-<code>.png`.
+- PAL probe 2 (`notes/pal-probe2.txt`, PAL SNES): AD_RESULT "NTSC M/J" for every 0x00, also autodetect 0x05/0x15 →
+  **cause: our tables write 0x07 (autodetect enable mask) = 0x00** (all standards off). 75 fields/s and 243 rows in
+  every combo. 0x85 (PAL): colour right (45), picture **sheared** diagonally (line length mismatch) – `p2-85-0d.png`;
+  NTSC standards: no shear but no colour. VinControl code 0x11 makes no difference.
+- Windows PAL composite run (`notes/win/pal/`, `regshadow.py notes/win/pal`) vs NTSC (`notes/win/analog/`):
+  VinControl **stays 0x0d00**; VideoWDmaControl2 **0x01680111** (bit 4 new; VideoRDma1/2Control2 0x111 too),
+  GenlockControl **0x1101** (0x1000), SystemClockReload **0xf988** (0x8f48), ClockLoadCount **0x42060** (0x37176),
+  AudioW/RDmaControl 0xc8000**f00** (0xc84: 3840 vs 3204 → 1920 vs 1601.6 samples per frame), LqWDmaCrtc rows 0x240
+  = 576, VideoWDmaControl 0x81000000 in preview. Also HDMIHsync/Vsync/HalfLine 0x850/0x854/0x858 = 0x00940016 /
+  0x00060003 / 0x377 (NTSC 0x00a00024 / 0x00070004 / 0x37e; HDMI 0x00820056 / 0x000a0005 / 0x75e) – the driver never
+  writes these for any input, so likely output timing. VAnalogVoutCRTC0/3 and HDMIProcAmpHueSat differ too (output).
+- Built: `run-pal-probe3.sh` → `tools/pal_probe3.py`: part 1 autodetect with 0x07 = 0x7f (0x00 = 0x15 / 0x05);
+  part 2 forced PAL with the Windows PAL values one at a time (ctl2 bit 4, genlock, clocks), ctl2+genlock, all
+  (`win`), all + 0x850..0x858 (`win-sync`): fields/s, packed-field rows, extent, colour → `notes/pal/p3-<combo>.png`,
+  woven frames `p3-win-frame.png` / `p3-win-sync-frame.png`.
+- **PAL probe 3** (`notes/pal-probe3.txt`, PAL SNES): with **0x07 = 0x7f** autodetect (0x00 = 0x15 or 0x05) reads
+  **PAL B/G/H/I/D** (S1 0x45). Forced PAL 0x85 + **VideoWDmaControl2 bit 4 (0x01680111) alone fixes it: 50 fields/s,
+  288 rows per packed field, clean picture, colour right** (`p3-ctl2.png`); genlock / clocks / 0x850.. alone change
+  nothing. Woven frame (Control 0x80/0x81…) = **574 rows** (287 per field, gaps 1), `p3-win-frame.png` clean.
+  (run script's name pattern missed `p3-ctl2*` – fixed; converted by hand.)
+- Driver (untested): `dec_load()` writes 0x07 = 0x7f and 0x00 = 0x1<insel> (autodetect, NTSC-M pedestal) after the
+  tables, so detection sees 50 Hz and loads table 3; `cap_pal` (analog and in_vtotal 625) → Control2 | 0x10 and
+  input_values column 2 (GenlockControl 0x1101, SystemClockReload 0xf988, ClockLoadCount 0x42060); no line skip
+  for PAL; restart when cap_pal changes. Audio already does 20 ms blocks at 25/50 fps.
+  Open: 576i woven frame has 574 card rows → last 2 delivered rows are stale.
+- Test: `run-v4l2-pal-test.sh` → `notes/v4l2-pal-test.txt`, `notes/pal/v4l2-{288p,256,576i}.png` (last-rows luma
+  printed for the 574/576 question). NTSC must be rechecked with `run-v4l2-analog-test.sh` (decoder now in autodetect).
+- **PAL driver test passed** (`notes/v4l2-pal-test.txt`, PAL SNES): autodetect → "50 Hz detected, decoder mode 3",
+  720x288p @ 50.01 fps, 256x288 @ 49.95, forced 576i 720x576 @ 25.00; 0 timeouts / no_buffer; v4l2-compliance
+  57/57; `notes/pal/v4l2-576i.png` clean. 576i rows 574/575 (not written by the card) are border black here, so
+  staleness not visible with this source.
+- **NTSC recheck passed** (`notes/v4l2-analog-test.txt`, NES flash-cart menu – not bars, so bar levels not
+  comparable): mode 0, 240p @ 60.10, 480i @ 30.05, comb 0.606, v4l2-compliance 57/57, picture clean. HDMI switch
+  streamed 0 frames (no HDMI source connected?).
+- PAL 256 wide was shifted left (cut left edge, black right): PAL picture sits further left in the line. SNES edges
+  29.3 .. 677.0 (span 647.7 = 864 × 256/341 ✓) → centre 353.2. New param **`retro_center_pal` = 35320** (NTSC
+  `retro_center` 36536), chosen in `build_taps()` by line length 864. Untested – recheck `notes/pal/v4l2-256.png`.
+- PAL 256 wide after `retro_center_pal`: user reports PAL works. **But 288p jitters up/down slightly** (576i fine);
+  not known whether it predates the autodetect change.
+- Built: `tools/wobble.py` (per-frame vertical/horizontal offset vs frame 0 from row/column luma profiles;
+  self-test finds a 1-row / 2-px shift), `tools/pal_probe4.py` (40 packed fields each with decoder auto 0x15+mask
+  7f / forced 0x85 (0x65 at 60 Hz) mask 0 / forced + mask 7f; Status3 values seen), `run-pal-wobble-test.sh [tag]`
+  (probe 4, then driver progressive + forced interlaced 100-frame streams → `notes/pal-wobble-<tag>.txt`,
+  `notes/pal/wobble-<tag>-{prog,il}.png`). Tags: pal50, pal60.
+- **PAL 60 / PAL M / NTSC 4.43** (driver, untested): AD_RESULT now gives line system and colour system separately:
+  50 Hz = PAL B/G/H/I/D, SECAM, PAL N (625 timing); decoder table 3 for every PAL-colour standard incl. PAL 60 /
+  PAL M, and SECAM; table 0 for NTSC M/J, NTSC 4.43, SECAM 525. PAL 60 → table 3 + 525 timing (240p/480i, NTSC line
+  skip, NTSC retro centre). dmesg / debugfs rx print the standard name.
+- **Wobble test** (`notes/pal-wobble-pal50.txt`, `-pal60.txt`): PAL 50 288p packed fields **alternate by exactly
+  one line** (0,+1,0,+1 …) with every decoder setting (auto / forced 0x85 / forced + mask) and in the driver
+  stream → not caused by autodetect. 576i steady. **PAL 60** (console 60 Hz switch): AD_RESULT "PAL 60" (S1 35),
+  driver loads table 3, 240p @ 59.55 / 480i @ 29.77, 0 timeouts, no vertical movement, picture/colour fine
+  (240p Test Suite). Its "horizontal 0,0,1,1" is a profile-match artefact: sub-pixel shift 0.00 px; frames differ
+  by the subcarrier dot pattern (4-frame cycle), not by position.
+- Hypothesis for 288p: ADV7181 PAL PVBEG 0xE8 = 0x65 has bit 6 (assumed DELE: V-bit begin one line later on even
+  fields) set; NTSC NVBEG 0xE5 = 0x25 has no delay bits. ADV7181 datasheet download failed (analog.com timeout).
+- Built: `run-pal-probe5.sh` → `tools/pal_probe5.py`: 0xE8 = 65/25/a5/e5, 0xEA = 63/23 → packed-field jitter.
+- **PAL probe 5** (`notes/pal-probe5.txt`): table e8=65 → field offsets 0/-1 alternate; e8=25 mostly 0 (3 × -1);
+  **e8=a5, e8=e5, ea=23 (with e8 25 or 65): 0 over all 40**. Caveat: probe grabs every ~2nd field with drifting
+  parity, so "steady" can be sampling luck → verify through the driver's consecutive stream.
+- Driver: param **`pal_prog_timing`** (0644, default 0xa563 = e8 a5 / ea 63; 0x6563 = table; -1 = untouched),
+  written in `dec_detect_locked()` for PAL table + 50 Hz progressive only; 576i gets 0x6563 (table). `dec_e8ea`
+  tracks what was written, reset by `dec_load()`.
+- Test: `run-pal-timing-test.sh` → `notes/pal-timing-test.txt`: 288p with 6xxx/a563/e563/2523/6523/2563 at
+  runtime (100 consecutive frames each, wobble.py), then 576i.
+- **Timing test** (`notes/pal-timing-test.txt`, driver stream, 100 consecutive 288p frames each): **every**
+  0xE8/0xEA setting (6563 a563 e563 2523 6523 2563) still alternates by one line (50/50); they only move the whole
+  picture by a line. Probe 5's "steady" = sampling luck. 576i steady. → `pal_prog_timing` doesn't help; to be
+  removed again once a fix exists. Plan: skip one line on every other field in the driver (cap_skip per frame),
+  needs the field parity.
+- Built: `run-pal-probe6.sh` → `tools/pal_probe6.py`: 80 consecutive packed fields (double buffer), parity from
+  the picture, all side-effect-free readable Gaia registers snapshotted per field → bits following the parity,
+  TS1 delta per parity, raw VinStatusAnalog / WDmaStatus / TS2 / Int0 / GenlockStatus / WDmaDebug.
+- **PAL probe 6** (`notes/pal-probe6.txt`): 80 consecutive packed fields, parity strictly 0/+1 alternating, TS1
+  +4 per field (no length difference). **InterruptStatus0 bit 24 (read right after the field) = field flag:
+  100 %** (Int0 0x94810000 ↔ 0x95810000); bit 24 = 1 → picture one line higher (row 29), 0 → lower (row 30).
+  (TS1/TS2 bit 2 and SystemClock bit 2 also match, but only because they count +4 per field.) For NTSC 240p the
+  bit stays set (analog probe 4) – consistent with no NTSC wobble. VinStatusAnalog 0x360 (= 864 samples/line).
+- Driver: `pal_prog_timing` removed again. New **`pal_field_fix`** (0644, default 1; -1 inverted, 0 off): in the
+  progressive loop with `cap_pal`, Int0 bit 24 is read right after the field landed (before re-arming); bit 24 = 0
+  → `slot_skip[slot]` = one line; copies use `mxo2_slot_offset()` (= slot base + cap_skip + slot_skip). The
+  lower fields' last delivered row is the card's unwritten row 288 (stale; border black on consoles).
+  Idea for later: the same flag may give the real field order for analog 576i/480i (now just alternating).
+- Test: `run-pal-field-test.sh` → `notes/pal-field-test.txt`: 288p with pal_field_fix 1/0/-1 (runtime), 256 wide,
+  576i.
+- **Field-fix test** (`notes/pal-field-test.txt`): pal_field_fix 1 → **288p vertical 0 over 100 consecutive
+  frames** (720 and 256 wide); 0 → 0/+1 (old jitter); -1 → 0/+2 (flag meaning confirmed). 576i steady.
+  But shifted fields' last row = content (last content row 287 in half the frames) → stale garbage, not black.
+- Driver: shifted fields repeat the line above as their last line (direct DMA path: memcpy in the vb2 buffer;
+  bounce/scaled path: source row clamped to the last valid field line). Untested – rerun `run-pal-field-test.sh`:
+  expect content rows (29, 252) in every 288p frame with fix 1.
+- **Field-fix retest passed** (`notes/pal-field-test.txt`): fix 1 → content rows (29, 252) in all 100 frames at
+  720 and 256 wide, vertical 0; fix 0 / -1 as before; 576i steady. User confirms PAL works.
+- README: composite NTSC / PAL / PAL 60 auto-detected; params `retro_center_pal`, `pal_field_fix` listed.
+- Open: Int0 bit 24 as real field order for analog 576i/480i; 576i rows 574/575 (card writes 574).
+
+### Component (2026-11-05)
+- User source: SD component only (480i / 576i); Windows dumps possible.
+- Windows tables: 2 = 525 component, 5 = 625 component (0x00 = 0x00, 0x05 PrimaryMode 0, 0x06 = 0x0e / 0x0f,
+  0x03 = 0x80 8-bit 656, 0x04 = 0x41), 6–8 1080i (29.97/30/25), 9–11 720p (59.94/60/50) with 0x05 = 1 and
+  0x03 = 0x0c (wider output bus). "Modes" 12/13 = mask / or tables, so no 480p/576p table. Hidden script for
+  2, 5–8: b7=1b only. FPGA: VinControlAnalog bit 16 for component.
+- Built: `run-comp-probe.sh` → `tools/comp_probe.py`: tables 2 / 5 × VinControlAnalog c000…/c001…: decoder
+  status, fields/s, packed-field rows, picture/colour → `notes/comp/c1-*.png`, woven frames `c1-{2,5}-frame.png`.
+- **Component probe 1** (`notes/comp-probe.txt`, SNES 60 Hz component, 240p menu): table 2 locks, 60 fields/s,
+  243 rows. **VinControlAnalog bit 16 needed**: with 0xc0010000 colours right + picture in place
+  (`notes/comp/c1-2-c001.png`); 0xc0000000 → Cb/Cr swapped (blue → red) and picture ~72 px right. In component
+  mode AD_RESULT / Status3 mean nothing (S1 4b "PAL", S3 2c with bit 2 = 50 Hz on a 60 Hz source; mask 0x07 = 0).
+- **Windows dumps** (user, moved from `dumps/` to `notes/win/{component,svideo}_{ntsc,pal}`,
+  `svideo_{ntsc_720x486,pal_720x576}`): vs composite only **VinControlAnalog 0xc0010000 for component**; S-video
+  = composite on the FPGA side. Standard-dependent values as for composite (Control2 bit 4, genlock 0x1101, clocks).
+  SystemClockReload differs per session (8f48, 4a060, 6b698, 8f688, 7c420, 38ae0) → computed, not important.
+  The "720x486/576" recording setting only changes Windows' Lq scaler / WDMA packing (Control 0x82000000,
+  Control2 0x101, LqWDmaCrtc 0xf3 = 243 / 0x120 = 288 rows per field) – recording path, not the input.
+- Driver (untested): **four video devices** (user choice: one per input, OBS PipeWire can't pick V4L2 inputs):
+  HDMI, Composite, S-Video, Component (`mxo2_input_names`, WirePlumber names `…-svideo`, `…-component`).
+  Decoder table = input - 1 (+3 for 625 lines); `dec_load()` uses `adv7181_modes[0..5]` (header now has all six
+  SD tables), hidden script SD or b7=1b, composite overrides / 0x17 sharpness only for composite; autodetect
+  mask 0x07 = 0x7f for all. Component: table follows the line system (pal), not the colour. Capture writes
+  VinControlAnalog 0xc0010000 for component. 240p / 256 / 320 formats for every analog input. Auto input picks
+  HDMI, else the decoder's current input (composite while idle). Module param `input` 0–3.
+- Test: `run-v4l2-input-test.sh svideo|component|composite [tag]` → `notes/v4l2-<input>[-tag]-test.txt`,
+  `notes/inputs/*.png` (levels printed). Open: component 50/60 detection (AD_RESULT with mask 0x7f untested in
+  component mode; fallback: field rate), component/S-video levels.
+
+### One video device, inputs via S_INPUT (2026-11-10) – built (7.3 headers), not installed
+- User (Fedora 44, kernel 7.3, PipeWire 1.6.11, WirePlumber 0.5.19): driver works, "PipeWire no picture"; wants one
+  device with the inputs on the input selector. Not reproducible from the sandbox (no PipeWire socket). Direct
+  V4L2 at that time: Composite device streamed (240p console), **HDMI device no signal → a stream there never
+  gets a frame**. With four devices, PipeWire apps that take the first camera got "MXO2 Mini HDMI" (lowest
+  /dev number = highest WirePlumber priority.session) → black. Likely the "no picture"; to be confirmed with
+  `run-pipewire-test.sh`.
+- Driver: one device **"Matrox MXO2 Mini"** (querycap card + vdev name); `m->vid` single; V4L2 input n =
+  MXO2_INPUT_n (HDMI, Composite, S-Video, Component), G_INPUT = m->input. S_INPUT switches at once
+  (`mxo2_switch_input`), EBUSY while vb2 buffers exist and the input differs; locks the choice until the last
+  handle closes (`mxo2_release`, v4l2_fh_is_singular_file). **"Input" menu control** back (MXO2_CID_INPUT =
+  USER_BASE+0x1f00: Auto / HDMI / Composite / S-Video / Component, default = `input=`) for PipeWire apps: sets
+  input_pref, clears the S_INPUT lock, switches now if idle (`mxo2_auto_input_now`), else the monitor applies it
+  after the stream stops. Format list follows m->input; HDMI keeps its last size (hdmi_width/height, 1080p at
+  first) without a signal; `fmt_input` = input the format was made for, start_streaming switches back to it if
+  Auto moved between S_FMT and REQBUFS. Sharpness control on the one device (acts on composite only).
+  ENUMINPUT status only for the selected input (others: decoder table not loaded → unknown).
+- WirePlumber rule: one entry, card "Matrox MXO2 Mini" → node.name `v4l2_input.mxo2-mini`. Old OBS PipeWire
+  sources (…-hdmi / …-composite) must be re-pointed.
+- Tests: all run-*.sh / mode_test.sh find "Matrox MXO2 Mini" and set the Input control (HDMI tests 1, composite
+  tests 2, input test IDX+1); analog test switches HDMI ↔ composite via the control and `-i 1`; obs_sim.py
+  checks S_INPUT EBUSY + second-handle REQBUFS while streaming. New `run-pipewire-test.sh` (as user):
+  node + EnumFormat from pw-dump, per input 60 frames through GStreamer pipewiresrc + PNG `notes/pw/<input>.png`,
+  WirePlumber journal.
+- Build check here: host headers /run/host/usr/src/kernels/7.3.3-200.fc44.x86_64 with the sandbox gcc 15 needs
+  `KCFLAGS="-include ccfix.h"` (redefines `__counted_by_ptr` empty; gcc 16 feature). Compile check only.
+- **PipeWire test** (`notes/pipewire-test.txt`, single-device build installed): node "Matrox MXO2 Mini" created
+  (formats cached from composite), but every pipewiresrc stream failed ("target not found"); journal:
+  `spa.v4l2: '/dev/video2' mmap: Invalid argument`. Cause (PipeWire 1.6 v4l2-utils.c `userptr_init`): when the
+  consumer brings its own buffers, PipeWire asks for **USERPTR** (driver: EINVAL), falls back to MMAP and maps
+  them **PROT_READ + MAP_PRIVATE** → vb2_mmap needs VM_SHARED → EINVAL. v4l2-ctl / OBS's V4L2 source map shared
+  → unaffected. Reproduced as user: `tools/mmap_check.py` (shared ok, private EINVAL, dmabuf ok).
+- Fix: `mxo2_mmap` turns a read-only private mapping into a shared one without VM_MAYWRITE (can never be written,
+  so no difference). USERPTR not added: the card's 32-bit DMA mask means swiotlb bouncing without an IOMMU, and
+  vb2's finish sync would then overwrite our CPU-written frames (chroma fix, notch, 256/320 scaling, line
+  doubling). Built, not installed. Check: `python3 -I tools/mmap_check.py /dev/videoN` → RESULT OK, then
+  `run-pipewire-test.sh`.
+- **PipeWire test passed** (mmap fix installed; `tools/mmap_check.py` RESULT OK): pictures through pipewiresrc for
+  Auto (composite, 720x480), Composite (NES, clean) and HDMI (camera 1080p). HDMI colours: magenta/posterized
+  highlights = the known AD9398 4:2:2 7-bit chroma fault ("Camera at 1080p30"); direct v4l2-ctl capture identical,
+  chroma LUT applied (all chroma bytes odd) → not a PipeWire issue. Test script: the 60-frame run used fakesink
+  without caps → "target not found" (no media class to link); now `! video/x-raw !`.
+- PipeWire test rerun: 60 frames in 1.1 s (composite / Auto) and 1.5 s (HDMI 1080p60, ~47 fps limit), pictures OK.
+- User: **720x240 / 720x288 removed**. Analog sizes now 720x480/576 (woven or line-doubled) + 320/256 x 240/288
+  (scaled). Any other request (old saved 720x240) → 720 x full height, also the default for 240p (was 720x240).
+  run-v4l2-retro-test.sh: 256 / 320 only. PAL field/wobble tests' "288p" stream is now 720x576 line-doubled
+  (row offsets count double). Built, not installed.

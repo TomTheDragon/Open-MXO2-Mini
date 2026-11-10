@@ -12,7 +12,7 @@ S="$HERE/build/open-mxo2-mini-dkms"
 rm -rf "$HERE/build"
 mkdir -p "$S/DEBIAN" "$S/usr/src/mxo2-$VER" "$S/usr/share/wireplumber/wireplumber.conf.d" \
 	"$S/usr/share/doc/open-mxo2-mini-dkms"
-cp "$TOP"/driver/*.c "$TOP"/driver/*.h "$TOP/driver/Makefile" "$TOP/driver/dkms.conf" "$S/usr/src/mxo2-$VER/"
+cp "$TOP"/driver/mxo2_*.c "$TOP"/driver/*.h "$TOP/driver/Makefile" "$TOP/driver/dkms.conf" "$S/usr/src/mxo2-$VER/"
 cp "$TOP/driver/51-mxo2.conf" "$S/usr/share/wireplumber/wireplumber.conf.d/"
 cp "$TOP/README.md" "$S/usr/share/doc/open-mxo2-mini-dkms/"
 cat > "$S/usr/share/doc/open-mxo2-mini-dkms/copyright" <<EOT

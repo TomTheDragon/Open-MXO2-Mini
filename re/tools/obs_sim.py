@@ -7,7 +7,7 @@ v4l2_init: open O_RDWR|O_NONBLOCK, S_INPUT, (S_STD / S_DV_TIMINGS only if the in
 G_PARM -> S_PARM, G_FMT, REQBUFS 4 mmap, QUERYBUF + mmap, QBUF all, STREAMON, select(1 s) + DQBUF + QBUF loop.
 While streaming, a second handle does what the properties dialog does.
 
-Usage: python3 -I obs_sim.py [/dev/videoN] [input, always 0] [width height] [seconds]
+Usage: python3 -I obs_sim.py [/dev/videoN] [input: 0 HDMI, 1 composite, 2 S-video, 3 component] [width height] [seconds]
 """
 import errno
 import fcntl
@@ -167,17 +167,6 @@ def properties(fd, label):
     return ins
 
 
-def other_device(path):
-    """The card's other video device (HDMI <-> Composite), by sysfs name."""
-    me = os.path.basename(path)
-    name = open('/sys/class/video4linux/%s/name' % me).read().strip()
-    for d in sorted(os.listdir('/sys/class/video4linux')):
-        n = open('/sys/class/video4linux/%s/name' % d).read().strip()
-        if d != me and n.startswith('Matrox MXO2') and n != name:
-            return '/dev/' + d
-    return None
-
-
 def try_stream(path):
     """REQBUFS 2 + QBUF + STREAMON on another handle; returns 0 or the errno."""
     fd = os.open(path, os.O_RDWR | os.O_NONBLOCK)
@@ -278,14 +267,16 @@ def stream(path, inp, width, height, secs):
                 try:
                     properties(fd2, 'props while streaming')
                     s_input(fd2, inp)       # OBS re-applies the selected input
-                    other = other_device(path)
-                    if other:
-                        e = try_stream(other)
-                        if e == 0:
-                            problem('the other device %s started streaming while %s streams' % (other, path))
-                        else:
-                            print('  [props while streaming] STREAMON on %s -> %s (expected EBUSY)' %
-                                  (other, errno.errorcode.get(e, e)), flush=True)
+                    other = (inp + 1) % len(inputs(fd2))
+                    try:
+                        s_input(fd2, other)
+                        problem('S_INPUT %d accepted while input %d streams' % (other, inp))
+                    except OSError as e:
+                        print('  [props while streaming] S_INPUT %d -> %s (expected EBUSY)' %
+                              (other, errno.errorcode.get(e.errno, e.errno)), flush=True)
+                    e = try_stream(path)
+                    if e == 0:
+                        problem('a second handle started streaming while %s streams' % path)
                 finally:
                     os.close(fd2)
                 props_done = True
@@ -311,7 +302,7 @@ def stream(path, inp, width, height, secs):
 
 def main():
     path = sys.argv[1] if len(sys.argv) > 1 else '/dev/video0'
-    inp = int(sys.argv[2]) if len(sys.argv) > 2 else 0      # one input per device
+    inp = int(sys.argv[2]) if len(sys.argv) > 2 else 0
     w, h = (int(sys.argv[3]), int(sys.argv[4])) if len(sys.argv) > 4 else (0, 0)
     secs = float(sys.argv[5]) if len(sys.argv) > 5 else 5
     scan(path)

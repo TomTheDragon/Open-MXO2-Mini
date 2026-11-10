@@ -3,12 +3,14 @@
 # Run with: sudo sh run-driver-capture.sh [rx_mode]
 cd "$(dirname "$0")" || exit 1
 OUT=notes/driver-capture.txt
-D=/sys/kernel/debug/mxo2/0000:02:00.0
+. ./mxo2-env.sh
+D=/sys/kernel/debug/mxo2/$MXO2_DEV
+mxo2_need_unlocked "Writing the driver's debugfs files (capture, rx, int_enable)"
 frames() { grep frames_onboard $D/status | awk '{print $2}'; }
 {
 	rmmod mxo2 2>/dev/null
 	echo "# insmod (rx_mode=${1:-10}), start"
-	insmod ../driver/mxo2.ko rx_mode=${1:-10} || exit 1
+	mxo2_insmod ../driver/mxo2.ko rx_mode=${1:-10} || exit 1
 	echo start > $D/capture || { dmesg | tail -5; rmmod mxo2; exit 1; }
 	sleep 4
 	echo "## status after 4 s"

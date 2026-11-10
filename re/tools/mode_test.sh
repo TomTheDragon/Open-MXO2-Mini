@@ -1,12 +1,14 @@
 #!/bin/sh
 # All composite sizes through the installed driver (runs as a user in the video group, no sudo):
 # per size: format, fps over 120 frames, one frame -> $OUT/mode-WxH.png; then v4l2-compliance and VLC (default input).
-# Usage: sh mode_test.sh OUTDIR [/dev/videoN, default: the "MXO2 Mini Composite" device]
+# Usage: sh mode_test.sh OUTDIR [/dev/videoN, default: the "Matrox MXO2 Mini" device, Input set to Composite]
 OUT=${1:?outdir}; V=${2:-}
 if [ -z "$V" ]; then
 	for n in /sys/class/video4linux/video*; do
-		grep -q "MXO2 Mini Composite" "$n/name" 2>/dev/null && V=/dev/$(basename "$n")
+		grep -qx "Matrox MXO2 Mini" "$n/name" 2>/dev/null && V=/dev/$(basename "$n")
 	done
+	# one device for all inputs: the Input control (0 Auto, 1 HDMI, 2 Composite, 3 S-Video, 4 Component) picks Composite
+	[ -n "$V" ] && v4l2-ctl -d "$V" -c input=2
 fi
 T="$(cd "$(dirname "$0")" && pwd)"
 mkdir -p "$OUT"
