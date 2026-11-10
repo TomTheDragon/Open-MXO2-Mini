@@ -33,6 +33,10 @@ speaks V4L2.
 - **Video outputs** (experimental): HDMI OUT and the analog outputs show the selected input (pass-through), also
   while no app captures. Works for NTSC / PAL analog inputs and HDMI 1080p30 so far; other formats leave the
   outputs dark. `output=0` turns it off.
+- **Video output from Linux** (experimental): a second V4L2 device **"Matrox MXO2 Mini Output"** plays video
+  to HDMI OUT and the analog OUT: YUYV 720×480 (NTSC) and 720×576 (PAL) (1080p: not working yet). While it plays,
+  pass-through and capture are off. Example: `ffmpeg -re -i clip.mp4 -vf scale=720:480 -pix_fmt yuyv422 -r
+  30000/1001 -f v4l2 /dev/videoN` (`v4l2-ctl --list-devices` shows N).
 - **Sharpness** control (composite only). 2 = sharpest (default; faint composite dot texture on colours), 1 = sharp
   with the colour-subcarrier dots filtered out, 0 = soft.
 - System suspend/resume, MSI interrupts, v4l2-compliance clean.
@@ -42,7 +46,7 @@ speaks V4L2.
 - HDMI 1080p **60** fps reaches about 47 fps. A full frame (4 MB) at 60 fps is more than the card's PCIe link moves.
   1080p30, 1080i, 720p and all SD/composite modes run at full rate.
 - S-video and component (SD) are new and barely tested. The video outputs are experimental (pass-through only).
-  Not supported: video output from Linux, the hardware scaler, the H.264 encoder (MXO2 Mini MAX).
+  Not supported: the hardware scaler, the H.264 encoder (MXO2 Mini MAX).
   Composite NTSC, PAL and PAL 60 are detected automatically (tested with NES, SNES and a 50/60 Hz-switchable PAL
   console); real interlaced 480i/576i sources are implemented but barely tested.
 - Composite field order (480i/576i) is not detected. Use `analog_field_swap=1` if motion combs.

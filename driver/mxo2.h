@@ -51,6 +51,7 @@ struct mxo2_stats {
 
 struct snd_pcm_substream;
 struct mxo2;
+struct mxo2_play;
 
 /* Inputs (V4L2 inputs 0-3 of the one video device). The analog ones share the ADV7181 decoder: table = input - 1 (525 lines), +3 (625). */
 enum { MXO2_INPUT_HDMI, MXO2_INPUT_COMPOSITE, MXO2_INPUT_SVIDEO, MXO2_INPUT_COMPONENT, MXO2_NUM_INPUTS };
@@ -207,7 +208,9 @@ struct mxo2 {
 	struct workqueue_struct *fix_wq; /* ordered: chroma fix + buffer completion */
 
 	/* video outputs (mxo2_output.c): pass-through of the captured input */
-	int out_format;         /* output format of the running capture, -1 = outputs not fed */
+	int out_format;         /* output format (MXO2_OUT_*) the outputs are set up for, -1 = outputs not fed */
+	bool playing;           /* the output device plays from Linux (mxo2_play.c); no capture meanwhile */
+	struct mxo2_play *play;
 	bool out_hpd;           /* a TV is connected to HDMI OUT */
 
 	struct mxo2_audio audio;
@@ -248,6 +251,11 @@ void mxo2_capture_stop_all(struct mxo2 *m);
 u32 mxo2_slot_offset(struct mxo2 *m, unsigned int slot);
 int mxo2_dma_to_host(struct mxo2 *m, u32 onboard, dma_addr_t sg_dma, unsigned int sg_entries,
 		     u32 width);
+int mxo2_dma(struct mxo2 *m, u32 onboard, dma_addr_t sg_dma, unsigned int sg_entries, u32 width, bool to_card);
+int mxo2_play_claim(struct mxo2 *m, int f);
+void mxo2_play_release(struct mxo2 *m);
+int mxo2_play_register(struct mxo2 *m);
+void mxo2_play_unregister(struct mxo2 *m);
 int mxo2_hbuf_alloc(struct mxo2 *m, struct mxo2_hbuf *b, u32 bytes);
 void mxo2_hbuf_free(struct mxo2 *m, struct mxo2_hbuf *b);
 void mxo2_hbuf_sync(struct mxo2 *m, struct mxo2_hbuf *b, bool for_cpu);
@@ -277,7 +285,12 @@ void mxo2_v4l2_unregister(struct mxo2 *m);
 void mxo2_v4l2_frame(struct mxo2 *m, unsigned int slot);
 bool mxo2_video_busy(struct mxo2 *m);
 
+/* output formats with known Windows settings (mxo2_output.c) */
+enum { MXO2_OUT_NTSC, MXO2_OUT_PAL, MXO2_OUT_1080P30, MXO2_OUT_FORMATS };
 bool mxo2_output_wanted(struct mxo2 *m);
+int mxo2_output_setup(struct mxo2 *m, int f);
+const char *mxo2_output_name(int f);
+void mxo2_output_show(struct mxo2 *m, u32 onboard, u32 ctl);
 void mxo2_output_start(struct mxo2 *m);
 void mxo2_output_stop(struct mxo2 *m);
 void mxo2_output_frame(struct mxo2 *m, unsigned int slot, u32 wdma_ctl);

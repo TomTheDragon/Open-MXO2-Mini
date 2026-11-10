@@ -46,7 +46,10 @@ MODULE_PARM_DESC(output_rdma, "Experiment: VideoRDma2Control value to use instea
 #define RDMA_OFF      0x20000000        /* Windows idle */
 #define RDMA_BASE     0x20000000
 
-enum { OUT_NTSC, OUT_PAL, OUT_1080P30, OUT_FORMATS };
+#define OUT_NTSC    MXO2_OUT_NTSC
+#define OUT_PAL     MXO2_OUT_PAL
+#define OUT_1080P30 MXO2_OUT_1080P30
+#define OUT_FORMATS MXO2_OUT_FORMATS
 static const char *const out_names[OUT_FORMATS] = { "NTSC 480i", "PAL 576i", "1080p30" };
 static const u8 tx_mode[OUT_FORMATS] = { 1, 3, 11 };
 /*
@@ -169,22 +172,13 @@ static void tx_power_by_hpd(struct mxo2 *m, bool log)
 	m->out_hpd = hpd;
 }
 
-/* Capture thread starting (cap_lock held): set the outputs up for its format. */
-void mxo2_output_start(struct mxo2 *m)
+/* Chips + FPGA output registers for output format f (MXO2_OUT_*); m->out_format = f on success. */
+int mxo2_output_setup(struct mxo2 *m, int f)
 {
 	size_t i;
-	int f, em, ret;
+	int em, ret;
 
 	m->out_format = -1;
-	mxo2_wr(m, RDMA2_CONTROL, RDMA_OFF);
-	if (!READ_ONCE(output))
-		return;
-	f = out_format(m);
-	if (f < 0) {
-		dev_info(&m->pdev->dev, "outputs: no pass-through for %ux%u%s @ %u fps yet\n", m->in_width,
-			 m->in_height, m->in_interlaced ? "i" : "p", m->in_fps);
-		return;
-	}
 	em = enc_mode[f][READ_ONCE(output_analog) ? 1 : 0];
 	mutex_lock(&m->rx_lock);
 	ret = write_table(m, ENC_ADDR, adv7341_modes[0], ARRAY_SIZE(adv7341_modes[0]));
@@ -203,12 +197,44 @@ void mxo2_output_start(struct mxo2 *m)
 	mutex_unlock(&m->rx_lock);
 	if (ret) {
 		dev_err(&m->pdev->dev, "outputs: chip setup failed (%d)\n", ret);
-		return;
+		return ret;
 	}
 	for (i = 0; i < ARRAY_SIZE(out_regs); i++)
 		mxo2_wr(m, out_regs[i].off, out_regs[i].val[f]);
 	m->out_format = f;
-	dev_info(&m->pdev->dev, "outputs: showing the %s input as %s\n", mxo2_input_names[m->input], out_names[f]);
+	return 0;
+}
+
+const char *mxo2_output_name(int f)
+{
+	return out_names[f];
+}
+
+/* Show the frame at card address `onboard` with read DMA control word `ctl`. */
+void mxo2_output_show(struct mxo2 *m, u32 onboard, u32 ctl)
+{
+	mxo2_wr(m, RDMA2_ADDRESS, onboard & 0x3fffffff);
+	mxo2_wr(m, RDMA2_CONTROL, ctl);
+}
+
+/* Capture thread starting (cap_lock held): set the outputs up for its format (pass-through). */
+void mxo2_output_start(struct mxo2 *m)
+{
+	int f;
+
+	m->out_format = -1;
+	mxo2_wr(m, RDMA2_CONTROL, RDMA_OFF);
+	if (!READ_ONCE(output))
+		return;
+	f = out_format(m);
+	if (f < 0) {
+		dev_info(&m->pdev->dev, "outputs: no pass-through for %ux%u%s @ %u fps yet\n", m->in_width,
+			 m->in_height, m->in_interlaced ? "i" : "p", m->in_fps);
+		return;
+	}
+	if (!mxo2_output_setup(m, f))
+		dev_info(&m->pdev->dev, "outputs: showing the %s input as %s\n", mxo2_input_names[m->input],
+			 out_names[f]);
 }
 
 /* Capture thread stopped: read DMA off (outputs black). */

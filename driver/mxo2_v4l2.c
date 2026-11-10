@@ -991,6 +991,9 @@ int mxo2_v4l2_register(struct mxo2 *m)
 	ret = vid_register(m);
 	if (ret)
 		goto err;
+	ret = mxo2_play_register(m);
+	if (ret)
+		dev_warn(&m->pdev->dev, "video output device not registered (%d)\n", ret);
 	return 0;
 err:
 	v4l2_device_unregister(&m->v4l2_dev);
@@ -1001,6 +1004,7 @@ err_wq:
 
 void mxo2_v4l2_unregister(struct mxo2 *m)
 {
+	mxo2_play_unregister(m);
 	vid_unregister(&m->vid);
 	v4l2_device_unregister(&m->v4l2_dev);
 	destroy_workqueue(m->fix_wq);

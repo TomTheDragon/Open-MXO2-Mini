@@ -1411,3 +1411,36 @@ text in `notes/datasheet/AD9398.txt`)
   not visible from the sandbox) worked after re-selecting the device "Matrox MXO2 Mini" + resolution in the
   source (old sources pointed at the per-input devices / 720x240). Driver capture verified here: 30 frames 720x480
   in 0.5 s, NES menu picture clean, with pass-through running.
+
+## Video output from Linux (2026-11-10) – built, not installed
+- Host → card DMA = the capture's PCI DMA with Command bit 29 (0x20000000, FUN_0003f800 direction 1); same SG
+  list format, PitchRes width = dwords per line. Driver: `mxo2_dma(…, to_card)` (mxo2_dma_to_host wraps it).
+- V4L2 output device **"Matrox MXO2 Mini Output"** (`driver/mxo2_play.c`, VFL_DIR_TX, MMAP/DMABUF/write(),
+  YUYV): 720x480 NTSC 29.97 (woven, field INTERLACED), 720x576 PAL 25, 1920x1080 30p – the formats with known
+  output settings (mxo2_output_setup(f), refactored out of the pass-through start). Thread "mxo2-play": next
+  queued buffer → PCI DMA into output slot k (card 0x1000000 + k·0x3f4800, 3 slots; NTSC 4 lines down to match
+  the capture layout) → buffer done → wait for the frame tick (hrtimer, fps of the format) → RDma2Address = slot,
+  Control 0xa0000168 (SD, written once per frame – probe 1 showed a still frame with one write) / 0xa2000000
+  (1080p). No new buffer: the last frame stays.
+- mxo2_play_claim(): drops the pass-through user; EBUSY if any capture thread still runs (V4L2, audio) – one DMA
+  engine, one output timing; sets genlock/clock (set_timing: input_values column 1 NTSC, 2 PAL, 0 HDMI – the
+  idle/free-run behaviour of these values without an input is untested), bus master on. capture_get() → EBUSY
+  while playing. Release: pass-through returns at the next monitor round.
+- Open: field alternation for 480i/576i (bit 24 per field, needs an output field signal), whether 1080p30 timing
+  free-runs without an HDMI input (genlock 0x401), audio out (AudioRDma), pacing vs the card's real output rate.
+- Test: `run-play-test.sh [ntsc] [pal] [1080p]` (as user): v4l2-ctl test patterns 10 s per format + ffmpeg
+  testsrc2, asks what the TV showed → `notes/play-test.txt`.
+- **Play test 1** (`notes/play-test.txt`): **NTSC and PAL playback work** (moving v4l2-ctl pattern on the TV,
+  299/250 frames in 10.1 s = exact pacing). **1080p30: nothing on screen** although 297 frames were shown by the
+  driver – likely genlock 0x401 (HDMI-input lock) without an HDMI input. ffmpeg: never started – the script ran it
+  under `timeout` without --foreground, ffmpeg reads the tty for keys → SIGTTIN, stopped; sandbox ffmpeg 7 with
+  -nostdin plays 30 frames fine (Fedora's libavdevice 62 has the v4l2 outdev too). Script: ffmpeg -nostdin;
+  1080p now tried with play_genlock 0 (auto 0x401) / 0x1000 / 0x400 / 0x1 (new module param, applied after the
+  timing values at playback start).
+- **Play test 2**: 1080p30 with play_genlock 0x401 / 0x1000 / 0x400 / 0x1: TV **"not supported"** every time
+  (a signal, wrong timing) → genlock is not it. Likely: no 74.25 MHz pixel clock without an HDMI input (with
+  HDMI in, the receiver's clock probably drives the video timing; SD works because the decoder's 27 MHz runs).
+  VoutControl was 0x1303 in every Windows preview (code 0x13 = 576p in the input code table?) – meaning unclear.
+  FUN_0001e778 = generic board I/O object; register annotations there unreliable. **ffmpeg -nostdin works**
+  (moving testsrc2 on HDMI). Needed: Windows dump during HD timeline playback (windows/mxo2-output.cmd step 4).
+  Driver: 1080p hidden unless `play_hd=1`.

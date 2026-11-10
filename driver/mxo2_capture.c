@@ -45,6 +45,7 @@
 #define VIN_CONTROL_HDMI   0x00000d02 /* bits 1:0 = 2: HDMI selected */
 #define VIN_CONTROL_OFF    0x00000d00
 #define DMA_CMD_FLAGS      0x10000000
+#define DMA_CMD_TO_CARD    0x20000000 /* host -> card memory (Windows FUN_0003f800 direction 1) */
 #define DMA_CMD_GO         0x80000000
 /* PciDmaPitchRes low field = line length in dwords (Windows: 0x3c0 for 1080p) */
 #define SG_MAX_LEN         0x1f000    /* Windows splits runs at this length */
@@ -121,6 +122,15 @@ static const struct { u16 off; u32 val[3]; } input_values[] = {
 	{ GAIA_SYSTEM_CLOCK_RELOAD, { 0x000184e8, 0x00008f48, 0x0000f988 } },
 	{ GAIA_CLOCK_LOAD_COUNT, { 0x0004b87f, 0x00037176, 0x00042060 } },
 };
+
+/* Genlock + system clock values for 0 = HDMI, 1 = analog NTSC, 2 = analog PAL timing */
+static void set_timing(struct mxo2 *m, int col)
+{
+	size_t i;
+
+	for (i = 0; i < ARRAY_SIZE(input_values); i++)
+		mxo2_wr(m, input_values[i].off, input_values[i].val[col]);
+}
 
 static void gaia_setup(struct mxo2 *m)
 {
@@ -414,12 +424,12 @@ static void arm_slot(struct mxo2 *m, unsigned int slot)
 }
 
 /*
- * Copy card memory at `onboard` into host memory described by a card SG list; waits until done.
- * Vsyncs during the wait queue the next audio block (no DMA from there: the engine is busy).
+ * Copy between card memory at `onboard` and host memory described by a card SG list (to_card: host -> card);
+ * waits until done. Vsyncs during the wait queue the next audio block (no DMA from there: the engine is busy).
  */
-int mxo2_dma_to_host(struct mxo2 *m, u32 onboard, dma_addr_t sg_dma, unsigned int sg_entries,
-		     u32 width)
+int mxo2_dma(struct mxo2 *m, u32 onboard, dma_addr_t sg_dma, unsigned int sg_entries, u32 width, bool to_card)
 {
+	u32 cmd = DMA_CMD_FLAGS | (to_card ? DMA_CMD_TO_CARD : 0);
 	u32 count = mxo2_rd(m, GAIA_PCI_DMA_COMMAND_COUNT);
 	ktime_t t0 = ktime_get();
 	unsigned long end;
@@ -431,8 +441,8 @@ int mxo2_dma_to_host(struct mxo2 *m, u32 onboard, dma_addr_t sg_dma, unsigned in
 	mxo2_wr(m, GAIA_PCI_DMA_SGADDRESS_UPPER, upper_32_bits(sg_dma));
 	mxo2_wr(m, GAIA_PCI_DMA_SGCOUNT, sg_entries * 3);
 	mxo2_wr(m, GAIA_PCI_DMA_PITCH_RES, width & 0x7ff);
-	mxo2_wr(m, GAIA_PCI_DMA_COMMAND, DMA_CMD_FLAGS);
-	mxo2_wr(m, GAIA_PCI_DMA_COMMAND, DMA_CMD_FLAGS | DMA_CMD_GO);
+	mxo2_wr(m, GAIA_PCI_DMA_COMMAND, cmd);
+	mxo2_wr(m, GAIA_PCI_DMA_COMMAND, cmd | DMA_CMD_GO);
 
 	end = jiffies + msecs_to_jiffies(DMA_TIMEOUT_MS);
 	while (mxo2_rd(m, GAIA_PCI_DMA_COMMAND_COUNT) == count) {
@@ -456,6 +466,11 @@ int mxo2_dma_to_host(struct mxo2 *m, u32 onboard, dma_addr_t sg_dma, unsigned in
 	m->stats.last_dma_us = us;
 	m->stats.max_dma_us = max(m->stats.max_dma_us, us);
 	return 0;
+}
+
+int mxo2_dma_to_host(struct mxo2 *m, u32 onboard, dma_addr_t sg_dma, unsigned int sg_entries, u32 width)
+{
+	return mxo2_dma(m, onboard, sg_dma, sg_entries, width, false);
 }
 
 /* Card address of a finished slot's first delivered line */
@@ -688,7 +703,6 @@ void mxo2_hw_fini(struct mxo2 *m)
 static int thread_start(struct mxo2 *m, bool video)
 {
 	struct device *dev = &m->pdev->dev;
-	size_t i;
 	int ret;
 
 	mxo2_input_power(m, video);
@@ -709,8 +723,7 @@ static int thread_start(struct mxo2 *m, bool video)
 	if (m->cap_analog && (m->in_height == 480 || m->in_height == 240))
 		m->cap_skip = (m->cap_interlaced ? 4 : 2) * m->cap_line_bytes;
 	mxo2_audio_reset(m);
-	for (i = 0; i < ARRAY_SIZE(input_values); i++)
-		mxo2_wr(m, input_values[i].off, input_values[i].val[m->cap_analog ? 1 + m->cap_pal : 0]);
+	set_timing(m, m->cap_analog ? 1 + m->cap_pal : 0);
 	mxo2_wr(m, GAIA_VIDEO_WDMA_CONTROL, 0);
 	/* bit 16: component data layout (Windows MVKAVBUS FUN_0002bf54; without it Cb/Cr swap and the picture
 	 * shifts, re/notes/comp-probe.txt) */
@@ -751,7 +764,8 @@ static void thread_stop(struct mxo2 *m)
 	mxo2_wr(m, GAIA_VIN_CONTROL, VIN_CONTROL_OFF);
 	mxo2_output_stop(m);
 	msleep(50);                     /* let a transfer still in flight finish */
-	pci_clear_master(m->pdev);
+	if (!m->playing)
+		pci_clear_master(m->pdev);
 	irq_teardown(m);
 	mxo2_input_power(m, false);
 	dev_info(&m->pdev->dev, "capture stopped: %llu frames, %llu audio blocks copied\n",
@@ -788,6 +802,10 @@ int mxo2_capture_get(struct mxo2 *m, unsigned int user)
 	mutex_lock(&m->cap_lock);
 	if (!m->hw_ready) {
 		ret = -ENODEV;
+		goto out;
+	}
+	if (m->playing) {               /* one DMA engine and one output timing: playback has them */
+		ret = -EBUSY;
 		goto out;
 	}
 	if ((m->cap_users & user) || ((user & video) && (m->cap_users & video))) {
@@ -932,6 +950,39 @@ void mxo2_capture_resume(struct mxo2 *m)
 	m->resume_capture = false;
 	mutex_unlock(&m->cap_lock);
 	dev_info(&m->pdev->dev, "resumed, input %s\n", mxo2_input_names[m->input]);
+}
+
+/*
+ * Playback (mxo2_play.c) takes the card: pass-through stops, refused while anything else captures (the PCI DMA
+ * engine and the output timing are shared). Sets the timing for output format f.
+ */
+int mxo2_play_claim(struct mxo2 *m, int f)
+{
+	int ret = 0;
+
+	mxo2_capture_put(m, MXO2_USER_OUTPUT);
+	mutex_lock(&m->cap_lock);
+	if (!m->hw_ready)
+		ret = -ENODEV;
+	else if (m->cap_thread || m->playing)
+		ret = -EBUSY;
+	if (!ret) {
+		m->playing = true;
+		set_timing(m, f == MXO2_OUT_1080P30 ? 0 : f == MXO2_OUT_PAL ? 2 : 1);
+		pci_set_master(m->pdev);
+	}
+	mutex_unlock(&m->cap_lock);
+	return ret;
+}
+
+/* Playback ends: the card is free again (pass-through comes back with the next monitor round). */
+void mxo2_play_release(struct mxo2 *m)
+{
+	mutex_lock(&m->cap_lock);
+	m->playing = false;
+	if (!m->cap_thread)
+		pci_clear_master(m->pdev);
+	mutex_unlock(&m->cap_lock);
 }
 
 void mxo2_capture_stop_all(struct mxo2 *m)
