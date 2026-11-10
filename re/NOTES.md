@@ -1494,3 +1494,4 @@ text in `notes/datasheet/AD9398.txt`)
   START (via a work item, trigger is atomic) and stops at hw_free / close. WirePlumber may have stored an
   output-only profile → restart it / pick the duplex profile once.
 - Fix confirmed: MXO2 audio input selectable in OBS again (engine start on trigger START).
+- User: the doubled modes (512x480 / 640x480) look sharper.
