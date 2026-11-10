@@ -7,7 +7,7 @@ OUT=notes/v4l2-retro-test.txt
 . ./mxo2-env.sh
 D=/sys/kernel/debug/mxo2/$MXO2_DEV
 {
-	trap pw_restore EXIT INT TERM
+	trap pw_restore EXIT; trap 'exit 130' INT TERM
 	load_driver input=1 "$@"
 	sleep 2
 	VDEV=
@@ -39,4 +39,3 @@ D=/sys/kernel/debug/mxo2/$MXO2_DEV
 	pw_restore
 } 2>&1 | tee $OUT
 chown "${SUDO_USER:-root}" $OUT notes/retro-* 2>/dev/null
-echo "note: test driver unloaded; sudo modprobe mxo2 loads the installed one (sudo sh ../driver/install.sh to update it)"

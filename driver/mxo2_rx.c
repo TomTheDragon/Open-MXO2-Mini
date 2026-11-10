@@ -155,6 +155,16 @@ static int i2c_read(struct mxo2 *m, u8 dev, u8 reg, u8 *val)
 	return ret;
 }
 
+int mxo2_i2c_write(struct mxo2 *m, u8 dev, u8 reg, u8 val)
+{
+	return i2c_write(m, dev, reg, val);
+}
+
+int mxo2_i2c_read(struct mxo2 *m, u8 dev, u8 reg, u8 *val)
+{
+	return i2c_read(m, dev, reg, val);
+}
+
 static int rx_rd(struct mxo2 *m, u8 reg, u8 *val)
 {
 	return i2c_read(m, AD9398_ADDR, reg, val);
@@ -785,6 +795,7 @@ void mxo2_rx_monitor(struct mxo2 *m)
 		dec_detect_locked(m);
 	else if (m->rx_mode >= 0)
 		monitor_hdmi_locked(m);
+	mxo2_output_monitor_locked(m);
 	if (!(READ_ONCE(m->cap_users) & (MXO2_USER_V4L2 | MXO2_USER_DEBUGFS))) {   /* both chips on */
 		if (m->input == MXO2_INPUT_HDMI)
 			dec_probe_locked(m);

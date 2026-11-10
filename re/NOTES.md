@@ -1310,3 +1310,104 @@ text in `notes/datasheet/AD9398.txt`)
   (scaled). Any other request (old saved 720x240) → 720 x full height, also the default for 240p (was 720x240).
   run-v4l2-retro-test.sh: 256 / 320 only. PAL field/wobble tests' "288p" stream is now 720x576 line-doubled
   (row offsets count double). Built, not installed.
+
+## Video outputs (2026-11-10) – research
+- Box outputs = same connectors as the inputs: HDMI OUT via **AD9889B** HDMI transmitter (I2C 0x72, EDID memory
+  0x7e, packet memory 0x70), analog OUT (composite / S-video / component) via **ADV7341** encoder (I2C 0x54).
+  On Linux both sit at power-on defaults (i2c-dump: AD9889B 0x41 = 0x50 = powered down, ADV7341 0x00 = 0x12 =
+  DACs off) → outputs dark.
+- FPGA output path (Gaia regs): VideoRDma1/2 (read on-board frames), Video1VH* (playback timing, unused by
+  Windows), VoutControl 0x800, VoutControlHDMI 0x804, VAnalogVoutControl/CRTC0-3 0x810-0x820, BramLut* (LUT),
+  HDMIProcAmp* (gain/hue/sat), Vout1/2ClippersControl, HDMIHsync/Vsync/HalfLine 0x850-0x858, AudioRDma 0x280.
+- **Windows mirrors the input to the outputs** (shadow dumps `notes/win*`): during preview VideoRDma2 reads the
+  same on-board ring the capture writes (VideoRDma2Address = ring slot, ring stride 0x3f4800 = ours), AudioRDma
+  runs too. Output timing follows the input format:
+  | input | VoutControl | VoutHDMI | HDMIHsync | HDMIVsync | HalfLine | VAnalogCRTC0..3 | RDma2Control |
+  |---|---|---|---|---|---|---|---|
+  | idle (no app) | 1101 | 2 | 00a00024 | 00070004 | 37e | 40 40 0 44030000 | 20000000 |
+  | HDMI 1080p30 | 1303 | 4 | 00820056 | 000a0005 | 75e | 08980028 2c 840 05050084 | a2000000 |
+  | NTSC comp/S-video | 1303 | 2 | 00a00024 | 00070004 | 37e | 40 40 0 44030000 | a0/a1000168 |
+  | PAL comp/component | 1303 | 2 | 00940016 | 00060003 | 377 | 30 40 0 33020000 | a0/a1000168 |
+  Also BramLutR/G/B 201fffff/1fffff/1fffff, Vout1/2Clippers 3, HDMIProcAmpHueSat differs per standard.
+  RDma2Control 0x168 = 360 dwords = 720 px YUYV pitch; bit 24 toggles (field?).
+- Chip setup is not static in MVKAVCIO: every chip register is an object (FUN_000150b8: +0x10 value, +0x14 name,
+  +0x38 address, +0x3c flags, +0x40 pending), set through virtual calls from the output classes. Board object
+  (driver class, FUN_00043dc4, stored in the driver object extension; init FUN_000458c4) holds chip pointers:
+  +0x2d8 ADV7181, +0x338 AD9889B (vtable VA 0x825e0), +0x340 AD9398, +0x358 ADV7341 (vtable 0x826a0),
+  +0x370 AD9889B packet memory. Ghidra VAs = image base 0x10000 + RVA.
+- Built: `windows/mxo2-output.cmd` + `mxo2-chips.wds` (kd, like mxo2-regs): per step (idle, HDMI preview,
+  composite preview, playback) the Gaia shadows + every chip register value + a note what the TV shows →
+  `windows/output/*.txt` → copy to `notes/win/output/`. Untested (no Windows here); the driver-object path
+  (DriverExtension +0x30 → ClientDriverExtension +0x28 → data +0x10) is printed step by step for fixing.
+- Possible features: (1) loop-through monitor of the selected input on HDMI + analog OUT (FPGA side known from
+  the table above, chip values from the Windows dump); (2) V4L2 output device = play video from Linux (needs
+  host→card PciDma direction + free-running output timing; MVKOUTPUT.sys / MVKTRANSFER.sys not decompiled yet;
+  Ghidra not installed on this machine); (3) analog encoder colour bars as a first sign of life (ADV734x has an
+  SD test-pattern generator; bit not confirmed – datasheets from analog.com blocked here).
+- **Chip tables found statically** (no Windows run needed for the chips): AD9889B DAT_0007a0f0, 12 modes × 0xb3
+  {index, value}, loader FUN_000194cc (writable only, in order), mode by format FUN_00019640 (0 init, 1 480i,
+  2 480p, 3 576i, 4 576p, 5 1080i50, 6 1080i60, 7 720p50, 8 720p60, 9 1080p24, 10 1080p25, 11 1080p30 – no
+  1080p50/60). ADV7341 DAT_00076e50, 24 modes × 0x87 u32, loader FUN_0001d698 (+ PWR_MODE 0xfc after modes 0/6),
+  mode FUN_0001d81c with user props +0xf4 (prop 0x22, NTSC pedestal?), +0xfc (prop 0x66, analog output type,
+  default 3), +0xf8 = 2: 480 → 1, 576 → 7, 720p50/60 → 0x13/0x11, 1080i60/50 → 0xb/0xd, 1080p → 0x17; then
+  EEPROM DAC calibration (FUN_0001d970 / FUN_0001dbb0, skipped for now). AD9889B helpers: FUN_000195b4 = power
+  by HPD (0x42 bit 6 → 0x41 bit 6), FUN_000197e8 = YCbCr (3) / RGB output (0x3b CSC, 0x16[7:6], AVI 0x45),
+  FUN_00019730 = audio channels (0x50/0x51), FUN_00019564 = re-write 0x96 (clear interrupts).
+  chipregs.py misses AD9889B idx 0x11/0x12 (regs 0x11/0x12) and ADV7341 idx 0x13 (reg 0x17 SOFT_RST), all
+  FUN_00019a24 objects. `tools/output_tables.py` → `notes/AD9889B.modes.txt`, `notes/ADV7341.modes.txt`,
+  `tools/output_modes.py`.
+- Built: `run-vout-probe.sh` → `tools/vout_probe.py` (interactive: asks what the TV shows per step) →
+  `notes/vout-probe.txt`. NTSC composite: chip tables (ENC 0→1, TX 0→1, HPD power), FPGA output regs from
+  win/analog/2-preview, then a woven frame grabbed to 0x400000 shown via VideoRDma2 (Control a0000168, once /
+  re-armed per field with bit 24 alternating), then live (3 slots, output = newest). Logs Video2Crc16 and
+  Video2DebugRDmaStatus per step.
+- Plan (user): pass-through by default, output from Linux optional (V4L2 output device).
+- User has Secure Boot on → kernel lockdown blocks user-space BAR access (probes need SB off). So the output
+  test moved into the driver (also the goal: pass-through by default).
+- **Driver pass-through** (`driver/mxo2_output.c`, built against 7.3, untested on hardware): module param
+  `output` (default 1). New capture user MXO2_USER_OUTPUT, taken by `mxo2_output_poll()` (rx_work, 500 ms) while
+  the selected input has a signal the outputs can show (analog: any; HDMI: 1920x1080p30 only); output/audio-only
+  captures restart on format change (cap_mode_stale) and keep both input chips powered (Auto keeps working;
+  thread_start(video) powers the other chip down only for V4L2/debugfs). thread_start → `mxo2_output_start()`:
+  ADV7341 mode 0 + N, AD9889B mode 0 + N (driver/output_modes.h, generated by output_tables.py), HPD power,
+  FPGA out_regs per format (NTSC / PAL / 1080p30 from the Windows previews); thread_stop → RDma2 off. Capture
+  loops call `mxo2_output_frame()` after every frame / field: RDma2Address = slot, RDma2Control = 0x20000000 |
+  capture control (0x82 progressive, 0x80/0x81 field) | analog pitch (0x168) → HDMI 1080p a2000000 and analog
+  480i a0/a1000168 as Windows; 240p packed fields give a2000168 (guess). `output_rdma` param overrides the
+  control word for experiments. Monitor follows HDMI OUT hot plug (reload TX table on plug-in). debugfs status
+  shows "outputs". mxo2_remove now cancels the monitor before stop_all.
+- **Output probe 1** (`notes/vout-probe.txt`, NTSC 240p console, Secure Boot now off): **picture on both
+  outputs** – still frame and live (226 frames / 15 s, polled). HDMI OUT: colour, **green tint**; composite OUT:
+  **no colour**. Step 1 (RDma2Control 0x20000000) showed a distorted picture → 0x20000000 does not stop the read
+  (old card memory shown). AD9889B HPD + rx sense seen (0x42 = e0). Chips were already set by the installed
+  pass-through driver before the probe.
+- Green tint: mode tables leave the TX in YCbCr out (0x16 = c4, CSC 0x3b bit 0 off) with AVI 0x45 = 0x18 (Y =
+  RGB) → TV decodes YCbCr as RGB. Windows FUN_000197e8 (RGB) fixes 0x3b/0x16/0x45 → driver now applies it
+  (tx_rgb) after the TX table and on hot plug. No colour on composite: guess = NTSC mode 1 is a YPbPr variant /
+  DACs 4-6 off (0x00 = 0x1c; Windows uses 0xfc after mode 0); or a PAL TV without NTSC 3.58 colour.
+- Built: `run-vout-probe2.sh` → `tools/vout_probe2.py` → `notes/vout-probe2.txt`: HDMI RGB vs YCbCr (FUN_000197e8
+  both ways), encoder NTSC modes 0/1/2 with all DACs on; asks per step, keeps the best analog mode.
+- **Output probe 2** (`notes/vout-probe2.txt`): HDMI **RGB (FUN_000197e8 RGB branch) = correct colours**; YCbCr
+  branch (= the table state, 0x16 c4 / 0x3b 8a / 0x45 18) green tint. Encoder with 0x00 = 0xfc: **mode 0 =
+  composite in colour**, modes 1 and 2 no colour.
+- Datasheet ADV7342/ADV7343 Rev. E now in `original/ADV7342_7343.pdf` (same register map family). 0x84 SD Mode 4:
+  bit 7 luma/chroma swap, **6 colour bars**, **5 burst disable**, 4 chroma disable, 3 active length, 2:1 SFL.
+  Table 37 (SD output routing by 0x02 bit 5 + 0x82 bits 2:1): mode 0 (0x02 20, 0x82 4a) = DAC1 CVBS, DAC2/3 Y/C,
+  DAC4-6 YPbPr; mode 1 (0x02 28, 0x82 49, 0x84 21) = DAC1-3 YPbPr, burst off, only DAC1-3 on (0x00 1c) →
+  composite jack = DAC1 shows Y only. So Windows "analog output type": modes 0/6 = composite + S-video (Windows
+  sets 0x00 = 0xfc after them), 1/7 = component. Driver: `output_analog` 0 (default, modes 0/6 + 0xfc) or 1
+  (1/7); HD always component (23 for 1080p). HDMI: tx_rgb confirmed.
+- **Driver pass-through works** (installed build with tx_rgb + output_analog 0): user: both outputs (HDMI OUT,
+  composite OUT) show the NTSC 240p console in colour, no app open. Not yet checked: pass-through while
+  capturing (OBS / 256x240), PAL, S-video/component inputs, HDMI 1080p30 in, S-video / component OUT.
+- Test hygiene (user: card still in use after tests): `reload-driver.sh` now cleans up on every exit (also errors,
+  Ctrl-C): if the test unloaded or replaced the driver, remaining holders are ended and the installed (DKMS)
+  driver is modprobe'd again, then PipeWire restarted for every user it was stopped for (state in
+  /run/mxo2-test.<pid>, since test steps run in `{ } | tee` subshells). Scripts' `trap … INT` now exit.
+  load_driver rebuilds driver/mxo2.ko when a source is newer (it was a stale Nov-5 four-device build).
+  run-load-test.sh uses it too; run-pipewire-test.sh ends leftover gst streams and resets Input to Auto on exit.
+  New `mxo2-who.sh [--close]`: lists (and ends) programs using the MXO2.
+- After the test-cleanup change: VLC needed /dev/video0 (MXO2 moved from video2; webcam gone), OBS (Flathub, logs
+  not visible from the sandbox) worked after re-selecting the device "Matrox MXO2 Mini" + resolution in the
+  source (old sources pointed at the per-input devices / 720x240). Driver capture verified here: 30 frames 720x480
+  in 0.5 s, NES menu picture clean, with pass-through running.

@@ -194,6 +194,7 @@ static int mxo2_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	m->in_table = -1;
 	m->dec_mode = -1;
 	m->dec_want = -1;
+	m->out_format = -1;
 	m->sharpness = 2;
 	m->in_pixel_rep = 1;
 	mutex_init(&m->rx_lock);
@@ -263,8 +264,8 @@ static void mxo2_remove(struct pci_dev *pdev)
 	mxo2_audio_unregister(m);       /* closes audio streams */
 	mxo2_v4l2_unregister(m);        /* stops a running stream */
 	debugfs_remove_recursive(m->dbg);
+	mxo2_hw_fini(m);                /* monitor stopped first: it would take the output user again */
 	mxo2_capture_stop_all(m);
-	mxo2_hw_fini(m);
 	pci_iounmap(pdev, m->mem);
 	pci_iounmap(pdev, m->regs);
 	pci_release_regions(pdev);

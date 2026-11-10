@@ -9,6 +9,14 @@ OUT=notes/pipewire-test.txt
 mkdir -p notes/pw
 [ $# -gt 0 ] || set -- auto
 {
+	# on exit (also Ctrl-C): no test stream left running, Input control back to Auto
+	cleanup() {
+		pkill -u "$(id -u)" -f 'gst-launch-1.0 .*pipewiresrc target-object=v4l2_input.mxo2' 2>/dev/null
+		[ -n "$VDEV" ] && v4l2-ctl -d "$VDEV" -c input=0 2>/dev/null
+		return 0
+	}
+	trap cleanup EXIT
+	trap 'exit 130' INT TERM
 	VDEV=
 	for n in /sys/class/video4linux/video*; do
 		grep -qx "Matrox MXO2 Mini" "$n/name" 2>/dev/null && VDEV=/dev/$(basename "$n")
@@ -69,7 +77,6 @@ for o in json.load(sys.stdin):
 			echo "  NO PICTURE (no frame from PipeWire)"
 		fi
 	done
-	v4l2-ctl -d "$VDEV" -c input=0
 	echo "# WirePlumber / PipeWire log (last 5 min, v4l2 / camera)"
 	journalctl --user -u wireplumber -u pipewire --since -5min --no-pager 2>/dev/null |
 		grep -E 'spa\.v4l2|s-monitors|wireplumber\[' | grep -i -E 'v4l2|camera|mxo2|video' | tail -20

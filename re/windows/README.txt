@@ -61,3 +61,26 @@ If a step says "Gaia object NOT found" or shows no RESULT line, bring the
 regs folder back anyway - the log contains what is needed to fix the script.
 mxo2-diag.wds must sit next to mxo2-regs.cmd; it logs the symbol download
 and module list first. If step 1 fails, the script stops there.
+
+MXO2 output helper (mxo2-output.cmd, kernel debugger)
+=====================================================
+
+What it does
+  Same idea as mxo2-regs.cmd, for the video OUTPUTS: at each step it saves the
+  FPGA register values and the box chips' register values (HDMI transmitter
+  AD9889B, analog encoder ADV7341, decoder, HDMI receiver) as the Matrox driver
+  set them, and asks what the TV shows on the HDMI OUT and analog OUT.
+
+You need
+  - The one-time setup of mxo2-regs.cmd (Debugging Tools, kernel debugging on).
+    Run mxo2-regs.cmd once first if you haven't.
+  - A TV/monitor on the MXO2's HDMI OUT; if possible one on composite OUT too.
+  - An HDMI source and a composite source.
+
+Steps
+  1. Double-click mxo2-output.cmd, answer "Yes" to the admin prompt.
+  2. Follow the four steps (idle, HDMI preview, composite preview, playback).
+     After each one, type what the outputs show (e.g. "HDMI out: game
+     picture 720p, composite out: black").
+  3. Copy the folder windows\output to Linux, into re/notes/win/.
+  If a step says "board object NOT found", bring the folder back anyway.

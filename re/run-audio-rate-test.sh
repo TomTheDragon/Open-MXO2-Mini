@@ -14,7 +14,7 @@ OUT=notes/audio-rate-test.txt
 . ./mxo2-env.sh
 D=/sys/kernel/debug/mxo2/$MXO2_DEV
 {
-	trap pw_restore EXIT INT TERM
+	trap pw_restore EXIT; trap 'exit 130' INT TERM
 	load_driver
 	sleep 1        # let the 500 ms monitor read the audio status
 	CARD=$(awk '/MXO2/ {print $1; exit}' /proc/asound/cards)

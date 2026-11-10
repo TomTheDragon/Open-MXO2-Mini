@@ -526,19 +526,26 @@ static void capture_loop_progressive(struct mxo2 *m)
 		}
 		n++;
 		arm_slot(m, n % MXO2_ONBOARD_SLOTS);   /* slot for the next frame */
+		mxo2_output_frame(m, (n - 1) % MXO2_ONBOARD_SLOTS, WDMA_CTL_CAPTURE);
 		if (n >= 2)
 			deliver_frame(m, (n - 2) % MXO2_ONBOARD_SLOTS, ts, n - 2);
 	}
 }
 
-static void arm_field(struct mxo2 *m, unsigned int slot, bool top)
+/* VideoWDmaControl for one field of a woven frame */
+static u32 field_ctl(struct mxo2 *m, bool top)
 {
 	bool odd = !top;
 
 	if (m->cap_analog && analog_field_swap)
 		odd = !odd;
+	return WDMA_CTL_FIELD(odd ? 1 : 0);
+}
+
+static void arm_field(struct mxo2 *m, unsigned int slot, bool top)
+{
 	mxo2_wr(m, GAIA_VIDEO_WDMA_ADDRESS, (slot * MXO2_FRAME_BYTES) & 0x3fffffff);
-	mxo2_wr(m, GAIA_VIDEO_WDMA_CONTROL, WDMA_CTL_FIELD(odd ? 1 : 0));
+	mxo2_wr(m, GAIA_VIDEO_WDMA_CONTROL, field_ctl(m, top));
 }
 
 /*
@@ -585,6 +592,7 @@ static void capture_loop_interlaced(struct mxo2 *m)
 			continue;
 		}
 		/* the field armed last has landed */
+		mxo2_output_frame(m, armed_slot, field_ctl(m, armed_top));
 		if (!armed_top && prev_top && prev_slot == armed_slot) {
 			done = armed_slot;
 			m->stats.ts_changes++;  /* counts complete frames */
@@ -628,6 +636,8 @@ static void rx_work_fn(struct work_struct *work)
 
 	mxo2_rx_monitor(m);
 	if (READ_ONCE(m->hw_ready))
+		mxo2_output_poll(m);
+	if (READ_ONCE(m->hw_ready))
 		schedule_delayed_work(&m->rx_work, msecs_to_jiffies(500));
 }
 
@@ -669,13 +679,19 @@ void mxo2_hw_fini(struct mxo2 *m)
 	cancel_delayed_work_sync(&m->rx_work);
 }
 
-static int thread_start(struct mxo2 *m)
+#define VIDEO_USERS (MXO2_USER_DEBUGFS | MXO2_USER_V4L2)
+
+/*
+ * video: a video user will be capturing. Only then the other input's chip is powered down as on Windows;
+ * for audio / output-only captures both stay on, so Auto still sees a signal on the other input.
+ */
+static int thread_start(struct mxo2 *m, bool video)
 {
 	struct device *dev = &m->pdev->dev;
 	size_t i;
 	int ret;
 
-	mxo2_input_power(m, true);
+	mxo2_input_power(m, video);
 	m->latest = -1;
 	memset(&m->stats, 0, sizeof(m->stats));
 	m->stats.started_ns = ktime_get_ns();
@@ -703,6 +719,7 @@ static int thread_start(struct mxo2 *m)
 	/* VinControl bits 1:0 = 2 HDMI, 0 analog (MVKAVBUS FUN_0002bf54) */
 	mxo2_wr(m, GAIA_VIN_CONTROL, ((m->cap_analog ? VIN_CONTROL_OFF : VIN_CONTROL_HDMI) & ~0x1f00) |
 		(vin_code & 0x1f) << 8);
+	mxo2_output_start(m);
 	ret = irq_setup(m);
 	if (ret) {
 		dev_err(dev, "interrupt setup failed (%d), use use_irq=0 to poll\n", ret);
@@ -719,6 +736,7 @@ static int thread_start(struct mxo2 *m)
 	}
 	return 0;
 err:
+	mxo2_output_stop(m);
 	mxo2_wr(m, GAIA_VIN_CONTROL, VIN_CONTROL_OFF);
 	mxo2_input_power(m, false);
 	return ret;
@@ -731,6 +749,7 @@ static void thread_stop(struct mxo2 *m)
 	mxo2_wr(m, GAIA_VIDEO_WDMA_CONTROL, 0);
 	mxo2_wr(m, GAIA_PCI_DMA_COMMAND, 0);
 	mxo2_wr(m, GAIA_VIN_CONTROL, VIN_CONTROL_OFF);
+	mxo2_output_stop(m);
 	msleep(50);                     /* let a transfer still in flight finish */
 	pci_clear_master(m->pdev);
 	irq_teardown(m);
@@ -763,7 +782,7 @@ static bool cap_mode_stale(struct mxo2 *m)
 /* Take a capture user; the thread starts with the first one. Only one video user at a time. */
 int mxo2_capture_get(struct mxo2 *m, unsigned int user)
 {
-	unsigned int video = MXO2_USER_DEBUGFS | MXO2_USER_V4L2;
+	unsigned int video = VIDEO_USERS;
 	int i, ret = 0;
 
 	mutex_lock(&m->cap_lock);
@@ -786,9 +805,11 @@ int mxo2_capture_get(struct mxo2 *m, unsigned int user)
 		}
 	}
 	if (m->cap_thread && (user & video) && cap_mode_stale(m))
-		thread_stop(m);         /* audio-only thread: restarted below in the current video mode */
+		thread_stop(m);         /* audio / output thread: restarted below in the current video mode */
+	else if (m->cap_thread && (user & video))
+		mxo2_input_power(m, true);      /* video joins a running audio / output capture */
 	if (!m->cap_thread) {
-		ret = thread_start(m);
+		ret = thread_start(m, (user | m->cap_users) & video);
 		if (ret) {
 			if (user == MXO2_USER_DEBUGFS)
 				for (i = 0; i < MXO2_HOST_BUFS; i++)
@@ -826,8 +847,38 @@ void mxo2_capture_put(struct mxo2 *m, unsigned int user)
 	}
 	if (!m->cap_users && m->cap_thread)
 		thread_stop(m);
+	else if ((user & VIDEO_USERS) && !(m->cap_users & VIDEO_USERS) && m->cap_thread)
+		mxo2_input_power(m, false);     /* audio / output go on: both input chips on again for Auto */
 out:
 	mutex_unlock(&m->cap_lock);
+}
+
+/*
+ * Every 500 ms (rx_work): with output=1 the capture runs while the selected input has a signal the outputs can
+ * show. An audio / output-only capture follows format changes (a video capture keeps its mode).
+ */
+void mxo2_output_poll(struct mxo2 *m)
+{
+	bool want = mxo2_output_wanted(m);
+	bool have = READ_ONCE(m->cap_users) & MXO2_USER_OUTPUT;
+
+	if (want && !have) {
+		mxo2_capture_get(m, MXO2_USER_OUTPUT);
+	} else if (!want && have) {
+		mxo2_capture_put(m, MXO2_USER_OUTPUT);
+	} else if (have) {
+		mutex_lock(&m->cap_lock);
+		if (m->cap_thread && !(m->cap_users & VIDEO_USERS) && cap_mode_stale(m)) {
+			thread_stop(m);
+			if (thread_start(m, false)) {
+				dev_err(&m->pdev->dev, "capture restart for the new format failed\n");
+				mutex_lock(&m->frame_lock);
+				m->cap_users = 0;       /* only audio / output were using it */
+				mutex_unlock(&m->frame_lock);
+			}
+		}
+		mutex_unlock(&m->cap_lock);
+	}
 }
 
 /*
@@ -848,7 +899,7 @@ int mxo2_switch_input(struct mxo2 *m, int input)
 	if (running)
 		thread_stop(m);
 	ret = mxo2_select_input(m, input);
-	if (running && m->cap_users && thread_start(m))
+	if (running && m->cap_users && thread_start(m, m->cap_users & VIDEO_USERS))
 		dev_err(&m->pdev->dev, "capture restart after the input switch failed\n");
 	mutex_unlock(&m->cap_lock);
 	return ret;
@@ -876,7 +927,7 @@ void mxo2_capture_resume(struct mxo2 *m)
 		return;
 	}
 	mutex_lock(&m->cap_lock);
-	if (m->resume_capture && m->cap_users && thread_start(m))
+	if (m->resume_capture && m->cap_users && thread_start(m, m->cap_users & VIDEO_USERS))
 		dev_err(&m->pdev->dev, "capture restart after resume failed\n");
 	m->resume_capture = false;
 	mutex_unlock(&m->cap_lock);
@@ -888,6 +939,7 @@ void mxo2_capture_stop_all(struct mxo2 *m)
 	mxo2_capture_put(m, MXO2_USER_DEBUGFS);
 	mxo2_capture_put(m, MXO2_USER_V4L2);
 	mxo2_capture_put(m, MXO2_USER_AUDIO);
+	mxo2_capture_put(m, MXO2_USER_OUTPUT);
 }
 
 /* ---- debugfs ---- */
@@ -951,10 +1003,13 @@ static int status_show(struct seq_file *s, void *unused)
 	struct mxo2_stats st = m->stats;
 	u64 secs_x100 = st.started_ns ? div_u64(ktime_get_ns() - st.started_ns, 10000000) : 0;
 
-	seq_printf(s, "running        %s%s%s%s\n", m->cap_thread ? "yes" : "no",
+	seq_printf(s, "running        %s%s%s%s%s\n", m->cap_thread ? "yes" : "no",
 		   m->cap_users & MXO2_USER_V4L2 ? " V4L2" : "",
 		   m->cap_users & MXO2_USER_DEBUGFS ? " debugfs" : "",
-		   m->cap_users & MXO2_USER_AUDIO ? " audio" : "");
+		   m->cap_users & MXO2_USER_AUDIO ? " audio" : "",
+		   m->cap_users & MXO2_USER_OUTPUT ? " output" : "");
+	seq_printf(s, "outputs        %s, HDMI OUT %s\n", m->out_format >= 0 ? "showing the input" : "not fed",
+		   m->out_hpd ? "TV connected" : "no TV");
 	seq_printf(s, "audio rate     %u Hz (channel status %u, clock regeneration %u)%s\n", m->in_audio_rate,
 		   m->in_rate_cs, m->in_rate_cts, m->audio.rate_mismatch ? ", STREAM RATE DIFFERS" : "");
 	seq_printf(s, "audio          %s, %llu blocks, %llu samples, %llu overruns, %llu DMA errors, "

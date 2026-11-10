@@ -6,7 +6,7 @@ cd "$(dirname "$0")" || exit 1
 OUT=notes/comp-probe.txt
 mkdir -p notes/comp
 {
-	trap pw_restore EXIT INT TERM
+	trap pw_restore EXIT; trap 'exit 130' INT TERM
 	unload_driver
 	timeout 180 python3 -I tools/comp_probe.py
 	pw_restore
@@ -15,4 +15,3 @@ sed -n 's/.*saved notes\/comp\/\(c1-[0-9a-z-]*\)\.raw (720x\([0-9]*\)).*/\1 \2/p
 	python3 -I tools/raw2png.py notes/comp/$f.raw notes/comp/$f.png 720 "$h" 1 plain
 done
 chown -R "${SUDO_USER:-root}" $OUT notes/comp 2>/dev/null
-echo "note: driver unloaded; sudo modprobe mxo2 loads the installed one again"

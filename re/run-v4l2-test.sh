@@ -7,7 +7,8 @@ OUT=notes/v4l2-test.txt
 D=/sys/kernel/debug/mxo2/$MXO2_DEV
 command -v v4l2-ctl >/dev/null || { echo "v4l2-ctl missing: sudo dnf install v4l-utils, or apt install v4l-utils"; exit 1; }
 {
-	rmmod mxo2 2>/dev/null
+	. ./reload-driver.sh     # unloads mxo2 even while in use (PipeWire restarted on exit)
+	unload_driver
 	modprobe -a videodev videobuf2-v4l2 videobuf2-dma-sg || exit 1
 	mxo2_insmod ../driver/mxo2.ko || exit 1
 	sleep 1
@@ -18,7 +19,7 @@ command -v v4l2-ctl >/dev/null || { echo "v4l2-ctl missing: sudo dnf install v4l
 	# one device for all inputs: the Input control (0 Auto, 1 HDMI, 2 Composite, 3 S-Video, 4 Component) picks HDMI
 	[ -n "$DEV" ] && v4l2-ctl -d "$DEV" -c input=1
 	echo "# device: $DEV"
-	[ -n "$DEV" ] || { dmesg | tail -10; rmmod mxo2; exit 1; }
+	[ -n "$DEV" ] || { dmesg | tail -10; unload_driver; exit 1; }
 	echo "# v4l2-ctl --all"
 	v4l2-ctl -d "$DEV" --all
 	echo "# stream 300 frames (no saving)"
@@ -33,7 +34,7 @@ command -v v4l2-ctl >/dev/null || { echo "v4l2-ctl missing: sudo dnf install v4l
 	if command -v v4l2-compliance >/dev/null; then
 		v4l2-compliance -d "$DEV" -s 2>&1 | grep -E 'fail|FAIL|warn|Total|test VIDIOC_(G|S|TRY)_FMT|Streaming' | head -40
 	fi
-	rmmod mxo2
+	unload_driver
 	echo "# dmesg"
 	dmesg | grep -i -E 'mxo2|videobuf|v4l2' | tail -12
 } 2>&1 | tee $OUT

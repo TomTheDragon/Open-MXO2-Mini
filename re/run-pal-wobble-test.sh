@@ -34,7 +34,7 @@ stream() {
 }
 
 {
-	trap pw_restore EXIT INT TERM
+	trap pw_restore EXIT; trap 'exit 130' INT TERM
 	unload_driver
 	echo "### register level: packed fields per decoder setting"
 	timeout 180 python3 -I tools/pal_probe4.py
@@ -55,4 +55,3 @@ stream() {
 	pw_restore
 } 2>&1 | tee $OUT
 chown -R "${SUDO_USER:-root}" $OUT notes/pal 2>/dev/null
-echo "note: test driver unloaded; sudo modprobe mxo2 loads the installed one (sudo sh ../driver/install.sh to update it)"

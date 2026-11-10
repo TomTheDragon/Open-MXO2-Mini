@@ -17,7 +17,8 @@ try_values() {
 }
 total_irqs() { grep '^irq' $D/status | sed 's/.*, \([0-9]*\) handled.*/\1/'; }
 {
-	rmmod mxo2 2>/dev/null
+	. ./reload-driver.sh     # unloads mxo2 even while in use (PipeWire restarted on exit)
+	unload_driver
 	echo "# receiver setup"
 	timeout 30 python3 -I tools/rx_setup.py "${1:-10}"
 	echo "# MSI"
@@ -28,7 +29,7 @@ total_irqs() { grep '^irq' $D/status | sed 's/.*, \([0-9]*\) handled.*/\1/'; }
 	cat $D/status
 	MSI_IRQS=$(total_irqs)
 	echo stop > $D/capture
-	rmmod mxo2
+	unload_driver
 	echo "# INTx (only if MSI saw nothing): MSI handled $MSI_IRQS"
 	if [ "$MSI_IRQS" = 0 ]; then
 		mxo2_insmod ../driver/mxo2.ko use_irq=2 int_enable=0x00900000 || exit 1
@@ -37,7 +38,7 @@ total_irqs() { grep '^irq' $D/status | sed 's/.*, \([0-9]*\) handled.*/\1/'; }
 		try_values
 		cat $D/status
 		echo stop > $D/capture
-		rmmod mxo2
+		unload_driver
 		grep -E '^ *16:' /proc/interrupts
 	else
 		echo "skipped: MSI works"

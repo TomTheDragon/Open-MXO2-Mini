@@ -206,12 +206,17 @@ struct mxo2 {
 	int sharpness;          /* composite: 0 decoder notch, 1 wide band + subcarrier filter, 2 wide band */
 	struct workqueue_struct *fix_wq; /* ordered: chroma fix + buffer completion */
 
+	/* video outputs (mxo2_output.c): pass-through of the captured input */
+	int out_format;         /* output format of the running capture, -1 = outputs not fed */
+	bool out_hpd;           /* a TV is connected to HDMI OUT */
+
 	struct mxo2_audio audio;
 };
 
 #define MXO2_USER_DEBUGFS BIT(0)  /* debugfs test capture (2 host buffers) */
 #define MXO2_USER_V4L2    BIT(1)  /* V4L2 streaming */
 #define MXO2_USER_AUDIO   BIT(2)  /* ALSA capture */
+#define MXO2_USER_OUTPUT  BIT(3)  /* video outputs show the input (no host copy) */
 
 /* A V4L2 buffer plus the card's SG list for it. */
 struct mxo2_vbuf {
@@ -250,6 +255,9 @@ unsigned int mxo2_build_card_sg(u8 *sg, struct scatterlist *sgl, unsigned int ne
 void mxo2_capture_debugfs(struct mxo2 *m);
 
 int mxo2_rx_setup(struct mxo2 *m);
+/* I2C to the box chips over SRI; callers hold rx_lock */
+int mxo2_i2c_write(struct mxo2 *m, u8 dev, u8 reg, u8 val);
+int mxo2_i2c_read(struct mxo2 *m, u8 dev, u8 reg, u8 *val);
 void mxo2_rx_detect(struct mxo2 *m);
 void mxo2_rx_monitor(struct mxo2 *m);
 void mxo2_rx_debugfs(struct mxo2 *m);
@@ -268,6 +276,13 @@ void mxo2_v4l2_unregister(struct mxo2 *m);
 /* called by the capture thread with a finished on-board slot; true if a buffer was filled */
 void mxo2_v4l2_frame(struct mxo2 *m, unsigned int slot);
 bool mxo2_video_busy(struct mxo2 *m);
+
+bool mxo2_output_wanted(struct mxo2 *m);
+void mxo2_output_start(struct mxo2 *m);
+void mxo2_output_stop(struct mxo2 *m);
+void mxo2_output_frame(struct mxo2 *m, unsigned int slot, u32 wdma_ctl);
+void mxo2_output_monitor_locked(struct mxo2 *m);
+void mxo2_output_poll(struct mxo2 *m);
 
 int mxo2_audio_register(struct mxo2 *m);
 void mxo2_audio_unregister(struct mxo2 *m);

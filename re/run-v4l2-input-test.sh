@@ -47,7 +47,7 @@ print('levels: Y min %d max %d mean %.0f | Cb %d..%d | Cr %d..%d' % (min(ys), ma
 }
 
 {
-	trap pw_restore EXIT INT TERM
+	trap pw_restore EXIT; trap 'exit 130' INT TERM
 	echo "### $NAME: input=$IDX, scan auto"
 	load_driver input=$IDX
 	sleep 2
@@ -70,4 +70,3 @@ print('levels: Y min %d max %d mean %.0f | Cb %d..%d | Cr %d..%d' % (min(ys), ma
 	pw_restore
 } 2>&1 | tee $OUT
 chown -R "${SUDO_USER:-root}" $OUT notes/inputs 2>/dev/null
-echo "note: test driver unloaded; sudo modprobe mxo2 loads the installed one (sudo sh ../driver/install.sh to update it)"

@@ -4,8 +4,9 @@
 # Output goes to notes/load-test.txt
 cd "$(dirname "$0")" || exit 1
 OUT=notes/load-test.txt
-. ./mxo2-env.sh
+. ./reload-driver.sh     # the installed driver comes back at the end
 DEV=$MXO2_DEV
+unload_driver
 {
 	echo "# insmod"
 	mxo2_insmod ../driver/mxo2.ko 2>&1

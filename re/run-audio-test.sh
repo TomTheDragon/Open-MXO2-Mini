@@ -14,7 +14,7 @@ OUT=notes/audio-test.txt
 . ./mxo2-env.sh
 D=/sys/kernel/debug/mxo2/$MXO2_DEV
 {
-	trap pw_restore EXIT INT TERM   # this block is a subshell (pipe to tee)
+	trap pw_restore EXIT; trap 'exit 130' INT TERM   # this block is a subshell (pipe to tee)
 	load_driver
 	CARD=$(awk '/MXO2/ {print $1; exit}' /proc/asound/cards)
 	VDEV=

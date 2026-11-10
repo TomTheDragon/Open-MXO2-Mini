@@ -35,7 +35,7 @@ print('mean luma rows 0-3: %s  last 4: %s' % (' '.join('%.0f' % v for v in y[:4]
 }
 
 {
-	trap pw_restore EXIT INT TERM
+	trap pw_restore EXIT; trap 'exit 130' INT TERM
 	echo "### A: input=1, scan auto (PAL console expected: 720x576 line-doubled, Field None @ 50)"
 	load_driver input=1 "$@"
 	sleep 3
@@ -56,4 +56,3 @@ print('mean luma rows 0-3: %s  last 4: %s' % (' '.join('%.0f' % v for v in y[:4]
 	pw_restore
 } 2>&1 | tee $OUT
 chown -R "${SUDO_USER:-root}" $OUT notes/pal 2>/dev/null
-echo "note: test driver unloaded; sudo modprobe mxo2 loads the installed one (sudo sh ../driver/install.sh to update it)"

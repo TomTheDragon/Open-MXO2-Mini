@@ -48,7 +48,7 @@ print('comb ratio %.3f (woven fields ok < 1, swapped > 1; progressive ~0.7)' % (
 }
 
 {
-	trap pw_restore EXIT INT TERM
+	trap pw_restore EXIT; trap 'exit 130' INT TERM
 	echo "### A: input=1, scan auto (240p console expected: 720x480 line-doubled, Field None @ 60)"
 	load_driver input=1 "$@"
 	sleep 2
@@ -76,4 +76,3 @@ print('comb ratio %.3f (woven fields ok < 1, swapped > 1; progressive ~0.7)' % (
 	pw_restore
 } 2>&1 | tee $OUT
 chown "${SUDO_USER:-root}" $OUT notes/analog-240p.* notes/analog-480i.* 2>/dev/null
-echo "note: test driver unloaded; sudo modprobe mxo2 loads the installed one (sudo sh ../driver/install.sh to update it)"

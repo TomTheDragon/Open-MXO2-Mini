@@ -1,0 +1,63 @@
+$$ MXO2: dump the box chips' register values as the Matrox driver (MVKAVCIO) last wrote them.
+$$ Path: \Driver\<MVKAVCIO> -> DriverExtension -> ClientDriverExtension (+0x10 = data) -> board object
+$$ (FUN_00043dc4, vtable RVA 0x73bb0) -> chip objects: +0x2d8 ADV7181 decoder, +0x338 AD9889B HDMI TX,
+$$ +0x340 AD9398 HDMI RX, +0x358 ADV7341 encoder, +0x370 AD9889B packet memory.
+$$ Chip object: +8 register array, +0x10 count, +0x18 name. Register object: +0x10 value, +0x14 name,
+$$ +0x38 address, +0x3c flags, +0x40 pending. Same layout as the Gaia registers (mxo2-regs.wds).
+.printf "=== MXO2 chip register dump ===\n"
+r $t0 = 0
+.foreach /pS 4 /ps 99 (b {lm m MVKAVCIO}) { r $t0 = ${b} }
+.if (@$t0 == 0) {
+  .printf "RESULT: MVKAVCIO module not found\n"
+} .else {
+r $t1 = @$t0 + 0x725e0
+.printf "MVKAVCIO base %p, AD9889B vtable %p\n", @$t0, @$t1
+r $t2 = 0
+r $t3 = 0
+!object \Driver\MVKAVCIO
+.foreach /pS 1 /ps 99 (o {!object \Driver\MVKAVCIO}) { r $t3 = ${o} }
+.printf "driver object %p\n", @$t3
+.if (@$t3 != 0) {
+  .catch {
+    r $t4 = poi(@$t3 + 0x30);
+    r $t5 = poi(@$t4 + 0x28);
+    .printf "driver extension %p, client extension %p\n", @$t4, @$t5;
+    .while (@$t5 != 0) {
+      r $t6 = poi(@$t5 + 0x10);
+      .printf "  client data -> object %p, vtable %p, +0x338 %p\n", @$t6, poi(@$t6), poi(@$t6 + 0x338);
+      .if (poi(poi(@$t6 + 0x338)) == @$t1) {
+        r $t2 = @$t6
+      };
+      r $t5 = poi(@$t5)
+    }
+  }
+}
+.if (@$t2 == 0) {
+  .printf "RESULT: board object NOT found\n"
+} .else {
+  .printf "board object %p\n", @$t2
+  .for (r $t7 = 0; @$t7 < 5; r $t7 = @$t7 + 1) {
+    .if (@$t7 == 0) { r $t8 = 0x338 }
+    .elsif (@$t7 == 1) { r $t8 = 0x370 }
+    .elsif (@$t7 == 2) { r $t8 = 0x358 }
+    .elsif (@$t7 == 3) { r $t8 = 0x2d8 }
+    .else { r $t8 = 0x340 };
+    r $t9 = poi(@$t2 + @$t8);
+    .if (@$t9 != 0) {
+      r $t10 = poi(@$t9 + 8);
+      r $t11 = dwo(@$t9 + 0x10);
+      .printf "CHIP +%03x %p %ma, %d registers\n", @$t8, @$t9, @$t9 + 0x18, @$t11;
+      .if (@$t11 > 0x200) {
+        r $t11 = 0x200
+      };
+      .for (r $t12 = 0; @$t12 < @$t11; r $t12 = @$t12 + 1) {
+        r $t13 = poi(@$t10 + @$t12 * 8);
+        .if (@$t13 != 0) {
+          .printf "CREG +%03x %3d addr %02x flags %08x value %02x pending %02x %ma\n", @$t8, @$t12, dwo(@$t13 + 0x38), dwo(@$t13 + 0x3c), dwo(@$t13 + 0x10), dwo(@$t13 + 0x40), @$t13 + 0x14
+        }
+      }
+    }
+  };
+  .printf "RESULT: chips done\n"
+}
+}

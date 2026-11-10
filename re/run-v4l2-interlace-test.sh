@@ -6,7 +6,7 @@ OUT=notes/v4l2-interlace-test.txt
 . ./mxo2-env.sh
 D=/sys/kernel/debug/mxo2/$MXO2_DEV
 {
-	trap pw_restore EXIT INT TERM
+	trap pw_restore EXIT; trap 'exit 130' INT TERM
 	load_driver
 	sleep 2                 # monitor: detect 1080i, load the 1080i receiver table
 	VDEV=

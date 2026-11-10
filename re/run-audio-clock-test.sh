@@ -23,7 +23,7 @@ run() {  # $1 = label, rest = module parameters
 	python3 -I tools/wav_check.py notes/audio-clock-$L.wav | grep -E 'ch[01]:|tone|jumps|verdict'
 }
 {
-	trap pw_restore EXIT INT TERM
+	trap pw_restore EXIT; trap 'exit 130' INT TERM
 	run A audio_clock=48000 audio_pll=2
 	run B audio_clock=0 audio_pll=0
 	run C audio_clock=0 audio_pll=1

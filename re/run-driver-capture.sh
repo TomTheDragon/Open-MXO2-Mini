@@ -8,10 +8,11 @@ D=/sys/kernel/debug/mxo2/$MXO2_DEV
 mxo2_need_unlocked "Writing the driver's debugfs files (capture, rx, int_enable)"
 frames() { grep frames_onboard $D/status | awk '{print $2}'; }
 {
-	rmmod mxo2 2>/dev/null
+	. ./reload-driver.sh     # unloads mxo2 even while in use (PipeWire restarted on exit)
+	unload_driver
 	echo "# insmod (rx_mode=${1:-10}), start"
 	mxo2_insmod ../driver/mxo2.ko rx_mode=${1:-10} || exit 1
-	echo start > $D/capture || { dmesg | tail -5; rmmod mxo2; exit 1; }
+	echo start > $D/capture || { dmesg | tail -5; unload_driver; exit 1; }
 	sleep 4
 	echo "## status after 4 s"
 	cat $D/status
@@ -27,7 +28,7 @@ frames() { grep frames_onboard $D/status | awk '{print $2}'; }
 	echo "frames in the last 2 s: $((b - a))"
 	cat $D/status
 	echo stop > $D/capture
-	rmmod mxo2
+	unload_driver
 	echo "# dmesg"
 	dmesg | grep mxo2 | tail -8
 } 2>&1 | tee $OUT

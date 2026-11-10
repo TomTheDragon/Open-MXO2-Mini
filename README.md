@@ -30,6 +30,9 @@ speaks V4L2.
   The format list follows the selected input. The input can't change while the device streams.
 - One ALSA capture device **"MXO2 Mini"** (PipeWire: "MXO2 Mini Stereo"). It follows the input that is capturing.
   Without a signal it delivers silence instead of stalling.
+- **Video outputs** (experimental): HDMI OUT and the analog outputs show the selected input (pass-through), also
+  while no app captures. Works for NTSC / PAL analog inputs and HDMI 1080p30 so far; other formats leave the
+  outputs dark. `output=0` turns it off.
 - **Sharpness** control (composite only). 2 = sharpest (default; faint composite dot texture on colours), 1 = sharp
   with the colour-subcarrier dots filtered out, 0 = soft.
 - System suspend/resume, MSI interrupts, v4l2-compliance clean.
@@ -38,8 +41,8 @@ speaks V4L2.
 
 - HDMI 1080p **60** fps reaches about 47 fps. A full frame (4 MB) at 60 fps is more than the card's PCIe link moves.
   1080p30, 1080i, 720p and all SD/composite modes run at full rate.
-- S-video and component (SD) are new and barely tested. Not supported: the outputs, the hardware scaler, the H.264
-  encoder (MXO2 Mini MAX).
+- S-video and component (SD) are new and barely tested. The video outputs are experimental (pass-through only).
+  Not supported: video output from Linux, the hardware scaler, the H.264 encoder (MXO2 Mini MAX).
   Composite NTSC, PAL and PAL 60 are detected automatically (tested with NES, SNES and a 50/60 Hz-switchable PAL
   console); real interlaced 480i/576i sources are implemented but barely tested.
 - Composite field order (480i/576i) is not detected. Use `analog_field_swap=1` if motion combs.
@@ -126,6 +129,8 @@ Set them with `options mxo2 ...` in `/etc/modprobe.d/mxo2.conf`. The ones you ma
 | `composite_interlaced` | -1 | -1 auto, 0 force 240p/288p, 1 force 480i/576i |
 | `analog_field_swap` | 0 | Composite 480i/576i field order |
 | `input` | -1 | Default of the Input control (audio follows the input): -1 auto, 0 HDMI, 1 composite, 2 S-video, 3 component |
+| `output` | 1 | Video outputs show the selected input (pass-through); 0 off |
+| `output_analog` | 0 | Analog OUT for SD: 0 composite + S-video, 1 component YPbPr |
 | `use_irq` | 1 | 0 poll, 1 MSI, 2 legacy INTx |
 
 The rest (`rx_mode`, `vin_code`, `int_enable`, `chroma_fix`, `audio_clock`, `audio_pll`, `allow_write`) are for
