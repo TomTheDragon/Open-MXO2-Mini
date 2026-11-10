@@ -1444,3 +1444,31 @@ text in `notes/datasheet/AD9398.txt`)
   FUN_0001e778 = generic board I/O object; register annotations there unreliable. **ffmpeg -nostdin works**
   (moving testsrc2 on HDMI). Needed: Windows dump during HD timeline playback (windows/mxo2-output.cmd step 4).
   Driver: 1080p hidden unless `play_hd=1`.
+
+## Audio output (2026-11-10)
+- Windows (all preview dumps): **AudioRDmaControl = AudioWDmaControl** (HDMI 0xc8403200 = go | 0x48000000 | 8 ch
+  code 2 << 21 | 0x3200 dwords = 1600 samples × 32 B; NTSC analog 0xc8000c84 = stereo, 0xc84 dwords = 1602
+  samples × 8 B; PAL 0xc8000f00 = 1920), AudioRDmaAddress = an earlier block of the capture ring → audio
+  pass-through = play captured blocks. Idle RDma 0x08000000. AudioOutputCtl 0x00e40001 / AudioOutMute 0x00010000
+  = table defaults, never changed. AD9889B tables: N = 6144 (48 kHz), I2S on (0x0c = 0x3e), 0x15[7:4] = 2.
+- Driver stage 1 (built, untested): `output_audio` (default 1): the audio engine also runs while the outputs show
+  the captured input (out_format ≥ 0), not only for ALSA; when block n starts, block n−1 is complete →
+  AudioRDmaAddress = its slot, AudioRDmaControl = its capture control word (audio_play_block). No host copy
+  without an ALSA user. debugfs audio: "played" counter. Analog audio OUT: PCM3052 codec (I2C 0x8c, reads ff,
+  MVKAVCIO FUN_0004d04c) not set up yet.
+- Stage 2 (next): ALSA playback PCM on the "MXO2 Mini" card → blocks DMA'd host → card (like video playback) and
+  played with the read DMA, paced by the output frames.
+- **Audio pass-through works** (user: TV plays the console's sound over HDMI OUT).
+- Stage 2 (built, untested): ALSA **playback** on the "MXO2 Mini" card (S16_LE stereo 48 kHz). The playback thread
+  of mxo2_play.c became an engine with users VIDEO (output device streaming) / AUDIO (ALSA playback prepared);
+  audio alone runs it in NTSC timing; video in another format restarts it. Per frame: next 1601.6 / 1920 / 1600
+  samples (fraction carried) from the ALSA buffer (silence if not running) → card layout (2 × u32, sample << 16)
+  → PCI DMA host → card into audio slot 0x1c00000 + k·0x4000 (4 slots) → at the frame tick, after the video flip:
+  AudioRDmaAddress = slot, AudioRDmaControl = 0xc8000000 | dwords. vid_lock lets stop_streaming wait for a
+  buffer in work while audio keeps going. WirePlumber rule: the MXO2 ALSA sink gets priority 1 (never default),
+  description "Matrox MXO2 Mini Output". Test: `run-play-test.sh audio`.
+- Pacing is a software timer, not the card's output frames: card and system clocks drift → an occasional audio
+  click or a block that waits a frame is expected; no output-frame status found yet.
+- **ALSA playback works** (`notes/play-test.txt`): 440 Hz tone alone → sound on HDMI OUT (frame frozen = last
+  card frame, as expected); ffmpeg picture + beeps → both. Audio-only engine took the video user without restart
+  (one engine session 16:59:27–16:59:59). Not yet judged: tone cleanliness, L/R, beep–flash sync, long-run drift.

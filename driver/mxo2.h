@@ -111,6 +111,7 @@ struct mxo2_audio {
 	bool active;
 	u32 last_ts;
 	u64 armed, started, copied;
+	u64 played;             /* blocks handed to the audio read DMA (pass-through) */
 	u32 samples[8];         /* samples in each on-board slot */
 	unsigned int last_slot; /* slot of the last copied block */
 	bool rate_mismatch;     /* source rate != stream rate: delivering silence */
@@ -127,6 +128,13 @@ struct mxo2_audio {
 	u64 blocks, samples_total, overruns, dma_errors;
 	/* no source: silence keeps the ALSA stream (and PipeWire) running */
 	u64 real_ns;            /* last real block delivered (or stream start) */
+	/* ALSA playback (to the outputs, fed by the playback engine in mxo2_play.c) */
+	struct snd_pcm_substream *play_ss;
+	bool play_running;      /* triggered */
+	bool play_holding;      /* holds a playback engine reference */
+	snd_pcm_uframes_t play_ptr, play_period_pos;
+	struct mutex play_mutex; /* engine delivery vs. close */
+	u64 play_samples, play_underruns;
 	u64 silence_ns;         /* silence generated up to this time, 0 = not generating */
 	u64 silence_samples;
 };
@@ -256,6 +264,13 @@ int mxo2_play_claim(struct mxo2 *m, int f);
 void mxo2_play_release(struct mxo2 *m);
 int mxo2_play_register(struct mxo2 *m);
 void mxo2_play_unregister(struct mxo2 *m);
+/* playback engine users (mxo2_play.c): the output device and the ALSA playback stream */
+#define MXO2_PLAY_VIDEO BIT(0)
+#define MXO2_PLAY_AUDIO BIT(1)
+int mxo2_play_engine_get(struct mxo2 *m, unsigned int user, int fmt);
+void mxo2_play_engine_put(struct mxo2 *m, unsigned int user);
+/* engine -> ALSA: the next `samples` stereo frames in the card's layout (2 x 32 bit, sample in the upper half) */
+void mxo2_audio_play_fetch(struct mxo2 *m, u8 *dst, u32 samples);
 int mxo2_hbuf_alloc(struct mxo2 *m, struct mxo2_hbuf *b, u32 bytes);
 void mxo2_hbuf_free(struct mxo2 *m, struct mxo2_hbuf *b);
 void mxo2_hbuf_sync(struct mxo2 *m, struct mxo2_hbuf *b, bool for_cpu);

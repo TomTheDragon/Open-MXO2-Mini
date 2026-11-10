@@ -35,8 +35,11 @@ speaks V4L2.
   outputs dark. `output=0` turns it off.
 - **Video output from Linux** (experimental): a second V4L2 device **"Matrox MXO2 Mini Output"** plays video
   to HDMI OUT and the analog OUT: YUYV 720×480 (NTSC) and 720×576 (PAL) (1080p: not working yet). While it plays,
-  pass-through and capture are off. Example: `ffmpeg -re -i clip.mp4 -vf scale=720:480 -pix_fmt yuyv422 -r
-  30000/1001 -f v4l2 /dev/videoN` (`v4l2-ctl --list-devices` shows N).
+  pass-through and capture are off. Sound goes to the ALSA device `hw:CARD=Mini` (48 kHz stereo), also with
+  the picture: `ffmpeg -re -i clip.mp4 -map 0:v -vf scale=720:480 -pix_fmt yuyv422 -r 30000/1001 -f v4l2
+  /dev/videoN -map 0:a -ar 48000 -ac 2 -sample_fmt s16 -f alsa hw:CARD=Mini` (`v4l2-ctl --list-devices` shows N).
+- **Audio pass-through**: HDMI OUT carries the input's sound with the pass-through picture (`output_audio=0`
+  turns it off).
 - **Sharpness** control (composite only). 2 = sharpest (default; faint composite dot texture on colours), 1 = sharp
   with the colour-subcarrier dots filtered out, 0 = soft.
 - System suspend/resume, MSI interrupts, v4l2-compliance clean.

@@ -5,7 +5,8 @@
 # (module parameter play_genlock, set with sudo). Then, if ffmpeg is there, 10 s of ffmpeg's test picture.
 # Run as your user (no sudo), the new driver installed, no app capturing (OBS / VLC closed - playback needs the
 # card alone). TV on HDMI OUT and/or composite OUT.
-# Usage: sh run-play-test.sh [ntsc] [pal] [1080p]     (default: ntsc pal; 1080p is an experiment, see play_hd)
+# Usage: sh run-play-test.sh [ntsc] [pal] [1080p] [audio]   (default: ntsc pal; 1080p is an experiment, see play_hd;
+#        audio: a tone through ALSA alone, then picture + beeps together)
 cd "$(dirname "$0")" || exit 1
 OUT=notes/play-test.txt
 [ $# -gt 0 ] || set -- ntsc pal
@@ -49,6 +50,20 @@ ask() {
 			done
 			echo 0 | sudo tee $GL >/dev/null
 			echo N | sudo tee /sys/module/mxo2/parameters/play_hd >/dev/null ;;
+		audio)
+			# ALSA playback to the card ("MXO2 Mini", hw device), 48 kHz stereo
+			echo "### audio only: 440 Hz tone, 6 s (left louder than right)"
+			timeout 20 ffmpeg -nostdin -hide_banner -loglevel error -re -f lavfi -i \
+				"sine=frequency=440:sample_rate=48000,pan=stereo|c0=c0|c1=0.3*c0" -t 6 \
+				-ac 2 -ar 48000 -sample_fmt s16 -f alsa hw:CARD=Mini 2>&1 | tail -3
+			ask "audio only"
+			echo "### video + audio: ffmpeg testsrc2 with a beep every second, 12 s (beep with the flash?)"
+			timeout 30 ffmpeg -nostdin -hide_banner -loglevel error -re \
+				-f lavfi -i testsrc2=size=720x480:rate=30000/1001 \
+				-f lavfi -i "sine=frequency=1000:sample_rate=48000:beep_factor=4" -t 12 \
+				-map 0:v -pix_fmt yuyv422 -f v4l2 "$ODEV" \
+				-map 1:a -ac 2 -ar 48000 -sample_fmt s16 -f alsa hw:CARD=Mini 2>&1 | tail -3
+			ask "video + audio" ;;
 		*) echo "unknown format $want" ;;
 		esac
 	done

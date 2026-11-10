@@ -9,6 +9,12 @@
  * Windows FUN_0003f800 direction 1) and, at the next frame tick, points the output read DMA at it - the path the
  * pass-through uses with captured frames. While playing, pass-through and capture are off (shared DMA engine
  * and output timing).
+ * Audio: the same thread ("playback engine") also plays the ALSA playback stream: per frame the next 1601.6
+ * (NTSC) / 1920 (PAL) / 1600 (1080p) samples at 48 kHz go into an audio slot in card memory and the audio read
+ * DMA is started on it at the frame tick, in the stereo layout the analog-audio pass-through uses (2 x 32-bit
+ * words per sample, sample in the upper half; AudioRDmaControl = go | 0x48000000 | dwords). Without an ALSA
+ * stream it plays silence. The engine runs while the output device streams and/or the ALSA playback stream is
+ * prepared; audio alone uses NTSC timing (the picture then shows the last frame in card memory).
  */
 
 #include <linux/delay.h>
@@ -35,6 +41,11 @@ MODULE_PARM_DESC(play_genlock, "Experiment: GenlockControl value for playback in
 #define PLAY_BASE       0x01000000      /* after the capture slots (3 x 0x3f4800), below the audio ring */
 #define RDMA_ON         0xa0000000      /* enable | 0x20000000 as the pass-through; | 0x02000000 progressive */
 #define RDMA_FRAME      0x02000000
+#define APLAY_BASE      0x01c00000      /* audio playback slots, after the video slots, below the capture ring */
+#define APLAY_SLOT      0x4000          /* 1920 samples x 8 B max */
+#define APLAY_SLOTS     4
+#define ARDMA_GO        0xc8000000      /* go | 0x48000000, stereo (channel code 0) */
+#define AUDIO_RATE      48000
 
 static const struct play_fmt {
 	u32 width, height;
@@ -55,9 +66,19 @@ struct mxo2_play {
 	spinlock_t buf_lock;
 	struct list_head buf_list;
 	struct task_struct *thread;
-	int fmt;                        /* MXO2_OUT_* */
+	int fmt;                        /* MXO2_OUT_* of the output device */
 	u32 sequence;
 	u64 shown;                      /* frames put on the outputs */
+	/* engine */
+	struct mutex eng_lock;          /* users, start / stop */
+	unsigned int users;             /* MXO2_PLAY_VIDEO / _AUDIO */
+	int eng_fmt;                    /* format the engine runs in */
+	struct mutex vid_lock;          /* engine thread working on a video buffer (vs. stop_streaming) */
+	void *abuf;                     /* audio bounce: one frame of samples */
+	dma_addr_t abuf_dma;
+	u8 *asg;                        /* its one-entry card SG list */
+	dma_addr_t asg_dma;
+	u32 aacc;                       /* fractional samples (x fps_den), e.g. NTSC 1601.6 per frame */
 };
 
 static const struct play_fmt *pfmt(struct mxo2_play *p)
@@ -77,28 +98,47 @@ static struct mxo2_vbuf *to_mbuf(struct vb2_buffer *vb)
 
 /* ---- playback thread ---- */
 
+/* Copy the next frame of ALSA samples (or silence) into audio slot `aslot`; returns the sample count or < 0. */
+static int audio_frame(struct mxo2_play *p, const struct play_fmt *f, unsigned int aslot)
+{
+	struct mxo2 *m = p->m;
+	u32 samples = div_u64_rem(p->aacc + (u64)AUDIO_RATE * f->fps_num, f->fps_den, &p->aacc);
+	u32 bytes = samples * 8;
+
+	mxo2_audio_play_fetch(m, p->abuf, samples);
+	put_unaligned_le64(p->abuf_dma, p->asg);
+	put_unaligned_le32(bytes, p->asg + 8);
+	if (mxo2_dma(m, APLAY_BASE + aslot * APLAY_SLOT, p->asg_dma, 1, 2, true))
+		return -EIO;
+	return samples;
+}
+
 static int play_thread(void *data)
 {
 	struct mxo2_play *p = data;
 	struct mxo2 *m = p->m;
-	const struct play_fmt *f = pfmt(p);
+	const struct play_fmt *f = &play_fmts[p->eng_fmt];
 	u64 frame_ns = div_u64((u64)f->fps_num * NSEC_PER_SEC, f->fps_den);
 	u32 pitch = f->width * 2;
 	u32 ctl = RDMA_ON | (f->interlaced ? (pitch / 4) & 0x7ff : RDMA_FRAME);
 	ktime_t next = ktime_get();
-	unsigned int slot = 0;
+	unsigned int slot = 0, aslot = 0;
 
+	p->aacc = 0;
 	while (!kthread_should_stop()) {
-		struct mxo2_vbuf *buf;
+		struct mxo2_vbuf *buf = NULL;
 		unsigned long flags;
 		u32 onboard = PLAY_BASE + slot * MXO2_FRAME_BYTES;
-		int ret = -ENODATA;
+		int ret = -ENODATA, samples;
 
-		spin_lock_irqsave(&p->buf_lock, flags);
-		buf = list_first_entry_or_null(&p->buf_list, struct mxo2_vbuf, list);
-		if (buf)
-			list_del(&buf->list);
-		spin_unlock_irqrestore(&p->buf_lock, flags);
+		mutex_lock(&p->vid_lock);
+		if (READ_ONCE(p->users) & MXO2_PLAY_VIDEO) {
+			spin_lock_irqsave(&p->buf_lock, flags);
+			buf = list_first_entry_or_null(&p->buf_list, struct mxo2_vbuf, list);
+			if (buf)
+				list_del(&buf->list);
+			spin_unlock_irqrestore(&p->buf_lock, flags);
+		}
 		if (buf) {
 			ret = mxo2_dma(m, onboard + f->skip_lines * pitch, buf->card_sg_dma, buf->card_sg_entries,
 				       pitch / 4, true);
@@ -106,6 +146,8 @@ static int play_thread(void *data)
 			buf->vb.sequence = p->sequence++;
 			vb2_buffer_done(&buf->vb.vb2_buf, ret ? VB2_BUF_STATE_ERROR : VB2_BUF_STATE_DONE);
 		}
+		mutex_unlock(&p->vid_lock);
+		samples = audio_frame(p, f, aslot);
 		/* wait for the frame tick, then show the new frame (the last one stays up without a new buffer) */
 		next = ktime_add_ns(next, frame_ns);
 		if (ktime_before(ktime_get(), next)) {
@@ -119,7 +161,13 @@ static int play_thread(void *data)
 			p->shown++;
 			slot = (slot + 1) % PLAY_SLOTS;
 		}
+		if (samples > 0) {
+			mxo2_wr(m, GAIA_AUDIO_RDMA_ADDRESS, (APLAY_BASE + aslot * APLAY_SLOT) & 0x3fffffff);
+			mxo2_wr(m, GAIA_AUDIO_RDMA_CONTROL, ARDMA_GO | ((samples * 2) & 0xfffe));
+			aslot = (aslot + 1) % APLAY_SLOTS;
+		}
 	}
+	mxo2_wr(m, GAIA_AUDIO_RDMA_CONTROL, 0x08000000);       /* Windows idle value */
 	return 0;
 }
 
@@ -199,36 +247,94 @@ static void buf_queue(struct vb2_buffer *vb)
 	spin_unlock_irqrestore(&p->buf_lock, flags);
 }
 
-static int start_streaming(struct vb2_queue *q, unsigned int count)
+/* ---- playback engine (eng_lock held) ---- */
+
+static int engine_start(struct mxo2_play *p, int fmt)
 {
-	struct mxo2_play *p = vb2_get_drv_priv(q);
 	struct mxo2 *m = p->m;
 	int ret;
 
-	ret = mxo2_play_claim(m, p->fmt);
+	ret = mxo2_play_claim(m, fmt);
 	if (ret) {
 		dev_info(&m->pdev->dev, "output: busy (a capture runs), stop it first\n");
-		goto err;
+		return ret;
 	}
 	if (READ_ONCE(play_genlock))
 		mxo2_wr(m, GAIA_GENLOCK_CONTROL, READ_ONCE(play_genlock));
-	ret = mxo2_output_setup(m, p->fmt);
+	ret = mxo2_output_setup(m, fmt);
 	if (ret)
-		goto err_release;
-	p->sequence = 0;
-	p->shown = 0;
+		goto err;
+	p->eng_fmt = fmt;
 	p->thread = kthread_run(play_thread, p, "mxo2-play");
 	if (IS_ERR(p->thread)) {
 		ret = PTR_ERR(p->thread);
 		p->thread = NULL;
-		goto err_release;
+		goto err;
 	}
-	dev_info(&m->pdev->dev, "output: playing %s from Linux\n", mxo2_output_name(p->fmt));
+	dev_info(&m->pdev->dev, "output: playing %s from Linux\n", mxo2_output_name(fmt));
 	return 0;
-err_release:
-	mxo2_play_release(m);
 err:
-	return_all(p, VB2_BUF_STATE_QUEUED);
+	mxo2_play_release(m);
+	return ret;
+}
+
+static void engine_stop(struct mxo2_play *p)
+{
+	if (!p->thread)
+		return;
+	kthread_stop(p->thread);
+	p->thread = NULL;
+	mxo2_play_release(p->m);
+	dev_info(&p->m->pdev->dev, "output: stopped (%llu video frames shown)\n", p->shown);
+}
+
+/*
+ * A user (MXO2_PLAY_VIDEO / _AUDIO) starts. fmt: the video format (MXO2_OUT_*), or -1 for audio = keep the running
+ * format, else NTSC. Video in another format than a running audio-only engine restarts it.
+ */
+int mxo2_play_engine_get(struct mxo2 *m, unsigned int user, int fmt)
+{
+	struct mxo2_play *p = m->play;
+	int ret = 0;
+
+	if (!p)
+		return -ENODEV;
+	mutex_lock(&p->eng_lock);
+	if (fmt < 0)
+		fmt = p->thread ? p->eng_fmt : MXO2_OUT_NTSC;
+	if (p->thread && fmt != p->eng_fmt)
+		engine_stop(p);
+	if (!p->thread)
+		ret = engine_start(p, fmt);
+	if (!ret)
+		p->users |= user;
+	mutex_unlock(&p->eng_lock);
+	return ret;
+}
+
+void mxo2_play_engine_put(struct mxo2 *m, unsigned int user)
+{
+	struct mxo2_play *p = m->play;
+
+	if (!p)
+		return;
+	mutex_lock(&p->eng_lock);
+	p->users &= ~user;
+	if (!p->users)
+		engine_stop(p);
+	mutex_unlock(&p->eng_lock);
+}
+
+static int start_streaming(struct vb2_queue *q, unsigned int count)
+{
+	struct mxo2_play *p = vb2_get_drv_priv(q);
+	int ret;
+
+	p->sequence = 0;
+	p->shown = 0;
+	ret = mxo2_play_engine_get(p->m, MXO2_PLAY_VIDEO, p->fmt);
+	if (ret)
+		return_all(p, VB2_BUF_STATE_QUEUED);
 	return ret;
 }
 
@@ -236,12 +342,13 @@ static void stop_streaming(struct vb2_queue *q)
 {
 	struct mxo2_play *p = vb2_get_drv_priv(q);
 
-	if (p->thread)
-		kthread_stop(p->thread);
-	p->thread = NULL;
+	mutex_lock(&p->eng_lock);
+	p->users &= ~MXO2_PLAY_VIDEO;   /* the engine takes no more buffers ... */
+	mutex_unlock(&p->eng_lock);
+	mutex_lock(&p->vid_lock);       /* ... and finishes the one it works on */
+	mutex_unlock(&p->vid_lock);
 	return_all(p, VB2_BUF_STATE_ERROR);
-	dev_info(&p->m->pdev->dev, "output: stopped after %llu frames\n", p->shown);
-	mxo2_play_release(p->m);
+	mxo2_play_engine_put(p->m, MXO2_PLAY_VIDEO);
 }
 
 static const struct vb2_ops play_qops = {
@@ -435,6 +542,12 @@ int mxo2_play_register(struct mxo2 *m)
 	p->m = m;
 	p->fmt = MXO2_OUT_NTSC;
 	mutex_init(&p->lock);
+	mutex_init(&p->eng_lock);
+	mutex_init(&p->vid_lock);
+	p->abuf = dmam_alloc_coherent(&m->pdev->dev, APLAY_SLOT, &p->abuf_dma, GFP_KERNEL);
+	p->asg = dmam_alloc_coherent(&m->pdev->dev, 64, &p->asg_dma, GFP_KERNEL);
+	if (!p->abuf || !p->asg)
+		return -ENOMEM;
 	spin_lock_init(&p->buf_lock);
 	INIT_LIST_HEAD(&p->buf_list);
 

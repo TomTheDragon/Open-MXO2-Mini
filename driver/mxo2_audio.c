@@ -63,6 +63,13 @@ static int audio_pll = 2;
 module_param(audio_pll, int, 0644);
 MODULE_PARM_DESC(audio_pll, "AudioPllCtl value written at audio start (default 2 as Windows; -1 = leave)");
 
+static int output_audio = 1;
+module_param(output_audio, int, 0644);
+MODULE_PARM_DESC(output_audio, "Audio pass-through with the video pass-through (HDMI OUT audio): 1 = on (default), "
+		 "0 = off");
+
+#define A_RCTL_IDLE       0x08000000     /* AudioRDmaControl while idle (Windows) */
+
 static u32 source_rate(struct mxo2 *m)
 {
 	return m->in_audio_rate ? m->in_audio_rate : A_RATE_DEFAULT;
@@ -128,6 +135,22 @@ static void audio_next_size(struct mxo2 *m, u32 *samples)
 	*samples = min_t(u32, fps_spf ? fps_spf : stream_rate(m) / 60, A_MAX_SAMPLES);
 }
 
+/*
+ * Audio pass-through: the read DMA plays a captured block with the same control word it was captured with
+ * (Windows: AudioRDmaControl = AudioWDmaControl, RDma address = an earlier ring block). Called when block `b`
+ * has been completely written.
+ */
+static void audio_play_block(struct mxo2 *m, u64 b)
+{
+	struct mxo2_audio *a = &m->audio;
+	unsigned int slot = b % A_SLOTS;
+
+	mxo2_wr(m, GAIA_AUDIO_RDMA_ADDRESS, (A_RING_BASE + slot * A_SLOT_BYTES) & 0x3fffffff);
+	mxo2_wr(m, GAIA_AUDIO_RDMA_CONTROL, A_CTL_GO | A_CTL_IDLE | a->ch_code << 21 |
+		((a->samples[slot] * a->frame_bytes / 4) & 0xfffe));
+	a->played++;
+}
+
 static void audio_arm_next(struct mxo2 *m)
 {
 	struct mxo2_audio *a = &m->audio;
@@ -151,17 +174,26 @@ void mxo2_audio_reset(struct mxo2 *m)
 	a->armed = 0;
 	a->started = 0;
 	a->copied = 0;
+	a->played = 0;
 	a->acc = 0;
 	a->real_ns = ktime_get_ns();    /* grace period before silence */
 	a->frame_bytes = A_FRAME_BYTES;
 	a->ch_code = A_CH_8;
 	a->silence_ns = 0;
 	mxo2_wr(m, GAIA_AUDIO_WDMA_CONTROL, A_CTL_IDLE);
+	mxo2_wr(m, GAIA_AUDIO_RDMA_CONTROL, A_RCTL_IDLE);
 }
 
+/* an ALSA capture runs */
 static bool audio_wanted(struct mxo2 *m)
 {
 	return READ_ONCE(m->cap_users) & MXO2_USER_AUDIO;
+}
+
+/* the audio engine runs: for ALSA, or for the outputs while they show the captured input */
+static bool audio_engine_wanted(struct mxo2 *m)
+{
+	return audio_wanted(m) || (READ_ONCE(output_audio) && m->out_format >= 0);
 }
 
 /* A block started (TS1 changed)? Then queue the next one. Returns true if it did. */
@@ -171,7 +203,7 @@ static bool audio_check_start(struct mxo2 *m)
 	u32 ts;
 
 	if (!a->active) {
-		if (!audio_wanted(m))
+		if (!audio_engine_wanted(m))
 			return false;
 		/* first block */
 		if (audio_pll >= 0)
@@ -190,6 +222,8 @@ static bool audio_check_start(struct mxo2 *m)
 	a->last_ts = ts;
 	a->started++;
 	audio_arm_next(m);
+	if (a->started >= 2 && READ_ONCE(output_audio) && m->out_format >= 0)
+		audio_play_block(m, a->started - 2);    /* block started-1 just began: the one before is complete */
 	return true;
 }
 
@@ -198,7 +232,7 @@ void mxo2_audio_arm(struct mxo2 *m)
 {
 	unsigned long end = jiffies + msecs_to_jiffies(2) + 1;
 
-	if (!m->audio.active && !audio_wanted(m))
+	if (!m->audio.active && !audio_engine_wanted(m))
 		return;
 	while (!audio_check_start(m) && m->audio.active && time_before(jiffies, end))
 		usleep_range(100, 200);
@@ -285,8 +319,13 @@ void mxo2_audio_service(struct mxo2 *m, bool can_dma)
 	audio_silence(m);
 	if (!a->active || !can_dma)
 		return;
-	if (!audio_wanted(m)) {          /* last ALSA user gone: stop queuing */
+	if (!audio_engine_wanted(m)) {   /* last user gone: stop queuing */
 		mxo2_audio_reset(m);
+		return;
+	}
+	if (!audio_wanted(m)) {         /* pass-through only: nothing to copy to the host */
+		if (a->started >= 1)
+			a->copied = a->started - 1;
 		return;
 	}
 	mutex_lock(&a->mutex);          /* vs. pcm_close dropping the substream */
@@ -376,9 +415,9 @@ static int audio_show(struct seq_file *s, void *unused)
 	struct bar1_ctx b = { m, onboard & ((8 << 20) - 1) };
 	u32 mtc;
 
-	seq_printf(s, "active %d, users %x, armed %llu started %llu copied %llu, blocks %llu, overruns %llu, "
-		   "DMA errors %llu\n", a->active, m->cap_users, a->armed, a->started, a->copied, a->blocks,
-		   a->overruns, a->dma_errors);
+	seq_printf(s, "active %d, users %x, armed %llu started %llu copied %llu, played %llu, blocks %llu, "
+		   "overruns %llu, DMA errors %llu\n", a->active, m->cap_users, a->armed, a->started, a->copied,
+		   a->played, a->blocks, a->overruns, a->dma_errors);
 	seq_printf(s, "AudioWDmaControl shadow %08x, AudioInputCtl shadow %08x, TS1 %08x TS2 %08x\n",
 		   m->shadow[GAIA_AUDIO_WDMA_CONTROL / 4], m->shadow[GAIA_AUDIO_INPUT_CTL / 4],
 		   mxo2_rd(m, GAIA_AUDIO_WDMA_TIME_STAMP1), mxo2_rd(m, GAIA_AUDIO_WDMA_TIME_STAMP2));
@@ -525,6 +564,161 @@ static const struct snd_pcm_ops mxo2_pcm_ops = {
 	.pointer = pcm_pointer,
 };
 
+/* ---- playback (to HDMI OUT / analog OUT through the playback engine, mxo2_play.c) ---- */
+
+static const struct snd_pcm_hardware mxo2_play_hw = {
+	.info = SNDRV_PCM_INFO_MMAP | SNDRV_PCM_INFO_INTERLEAVED | SNDRV_PCM_INFO_BLOCK_TRANSFER |
+		SNDRV_PCM_INFO_MMAP_VALID,
+	.formats = SNDRV_PCM_FMTBIT_S16_LE,
+	.rates = SNDRV_PCM_RATE_48000,
+	.rate_min = 48000,
+	.rate_max = 48000,
+	.channels_min = 2,
+	.channels_max = 2,
+	.buffer_bytes_max = 256 * 1024,
+	.period_bytes_min = 1024,
+	.period_bytes_max = 64 * 1024,
+	.periods_min = 2,
+	.periods_max = 64,
+};
+
+/*
+ * Engine: fill `samples` stereo frames in the card layout (2 x 32-bit words, sample in the upper half) from the
+ * playback stream, or silence when it is not running.
+ */
+void mxo2_audio_play_fetch(struct mxo2 *m, u8 *dst, u32 samples)
+{
+	struct mxo2_audio *a = &m->audio;
+	struct snd_pcm_runtime *rt;
+	struct snd_pcm_substream *ss;
+	unsigned int periods = 0;
+	unsigned long flags;
+	u32 i;
+
+	mutex_lock(&a->play_mutex);     /* vs. play_close dropping the substream */
+	spin_lock_irqsave(&a->lock, flags);
+	ss = a->play_ss;
+	if (!ss || !a->play_running) {
+		spin_unlock_irqrestore(&a->lock, flags);
+		mutex_unlock(&a->play_mutex);
+		memset(dst, 0, samples * 8);
+		return;
+	}
+	rt = ss->runtime;
+	for (i = 0; i < samples; i++) {
+		const s16 *src = (const s16 *)(rt->dma_area + frames_to_bytes(rt, a->play_ptr));
+
+		put_unaligned_le32((u32)(u16)src[0] << 16, dst + i * 8);       /* left */
+		put_unaligned_le32((u32)(u16)src[1] << 16, dst + i * 8 + 4);   /* right */
+		if (++a->play_ptr >= rt->buffer_size)
+			a->play_ptr = 0;
+		if (++a->play_period_pos >= rt->period_size) {
+			a->play_period_pos = 0;
+			periods++;
+		}
+	}
+	a->play_samples += samples;
+	spin_unlock_irqrestore(&a->lock, flags);
+	while (periods--)
+		snd_pcm_period_elapsed(ss);
+	mutex_unlock(&a->play_mutex);
+}
+
+static int play_open(struct snd_pcm_substream *ss)
+{
+	struct mxo2 *m = snd_pcm_substream_chip(ss);
+	unsigned long flags;
+
+	ss->runtime->hw = mxo2_play_hw;
+	spin_lock_irqsave(&m->audio.lock, flags);
+	m->audio.play_ss = ss;
+	m->audio.play_running = false;
+	spin_unlock_irqrestore(&m->audio.lock, flags);
+	return 0;
+}
+
+static void play_release_engine(struct mxo2 *m)
+{
+	if (m->audio.play_holding) {
+		m->audio.play_holding = false;
+		mxo2_play_engine_put(m, MXO2_PLAY_AUDIO);
+	}
+}
+
+static int play_close(struct snd_pcm_substream *ss)
+{
+	struct mxo2 *m = snd_pcm_substream_chip(ss);
+	unsigned long flags;
+
+	play_release_engine(m);
+	mutex_lock(&m->audio.play_mutex);
+	spin_lock_irqsave(&m->audio.lock, flags);
+	m->audio.play_ss = NULL;
+	m->audio.play_running = false;
+	spin_unlock_irqrestore(&m->audio.lock, flags);
+	mutex_unlock(&m->audio.play_mutex);
+	return 0;
+}
+
+static int play_hw_free(struct snd_pcm_substream *ss)
+{
+	play_release_engine(snd_pcm_substream_chip(ss));
+	return 0;
+}
+
+/* The playback engine is started here (may sleep), not in trigger (atomic). */
+static int play_prepare(struct snd_pcm_substream *ss)
+{
+	struct mxo2 *m = snd_pcm_substream_chip(ss);
+	unsigned long flags;
+	int ret;
+
+	if (!m->audio.play_holding) {
+		ret = mxo2_play_engine_get(m, MXO2_PLAY_AUDIO, -1);
+		if (ret)
+			return ret;
+		m->audio.play_holding = true;
+	}
+	spin_lock_irqsave(&m->audio.lock, flags);
+	m->audio.play_ptr = 0;
+	m->audio.play_period_pos = 0;
+	spin_unlock_irqrestore(&m->audio.lock, flags);
+	return 0;
+}
+
+static int play_trigger(struct snd_pcm_substream *ss, int cmd)
+{
+	struct mxo2 *m = snd_pcm_substream_chip(ss);
+
+	switch (cmd) {
+	case SNDRV_PCM_TRIGGER_START:
+	case SNDRV_PCM_TRIGGER_RESUME:
+		m->audio.play_running = true;
+		return 0;
+	case SNDRV_PCM_TRIGGER_STOP:
+	case SNDRV_PCM_TRIGGER_SUSPEND:
+		m->audio.play_running = false;
+		return 0;
+	}
+	return -EINVAL;
+}
+
+static snd_pcm_uframes_t play_pointer(struct snd_pcm_substream *ss)
+{
+	struct mxo2 *m = snd_pcm_substream_chip(ss);
+
+	return READ_ONCE(m->audio.play_ptr);
+}
+
+static const struct snd_pcm_ops mxo2_play_ops = {
+	.open = play_open,
+	.close = play_close,
+	.hw_free = play_hw_free,
+	.prepare = play_prepare,
+	.trigger = play_trigger,
+	.pointer = play_pointer,
+};
+
 /* read-only control "HDMI Sample Rate": current source rate in Hz (0 = no audio) */
 static int rate_ctl_info(struct snd_kcontrol *kc, struct snd_ctl_elem_info *uinfo)
 {
@@ -561,6 +755,7 @@ int mxo2_audio_register(struct mxo2 *m)
 
 	spin_lock_init(&a->lock);
 	mutex_init(&a->mutex);
+	mutex_init(&a->play_mutex);
 	a->bounce = dma_alloc_coherent(dev, A_SLOT_BYTES, &a->bounce_dma, GFP_KERNEL);
 	a->bounce_sg = dma_alloc_coherent(dev, PAGE_SIZE, &a->bounce_sg_dma, GFP_KERNEL);
 	if (!a->bounce || !a->bounce_sg) {
@@ -572,14 +767,15 @@ int mxo2_audio_register(struct mxo2 *m)
 		goto err_mem;
 	strscpy(card->driver, "mxo2", sizeof(card->driver));
 	strscpy(card->shortname, "MXO2 Mini", sizeof(card->shortname));
-	snprintf(card->longname, sizeof(card->longname), "Matrox MXO2 Mini audio (HDMI or analog) at %s",
+	snprintf(card->longname, sizeof(card->longname), "Matrox MXO2 Mini audio (in: HDMI or analog, out) at %s",
 		 pci_name(m->pdev));
-	ret = snd_pcm_new(card, "MXO2 HDMI", 0, 0, 1, &pcm);
+	ret = snd_pcm_new(card, "MXO2 HDMI", 0, 1, 1, &pcm);
 	if (ret)
 		goto err_card;
 	pcm->private_data = m;
 	strscpy(pcm->name, "MXO2 Mini", sizeof(pcm->name));
 	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_CAPTURE, &mxo2_pcm_ops);
+	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_PLAYBACK, &mxo2_play_ops);
 	snd_pcm_set_managed_buffer_all(pcm, SNDRV_DMA_TYPE_VMALLOC, NULL, 0, 0);
 	ret = snd_ctl_add(card, snd_ctl_new1(&rate_ctl, m));
 	if (ret)
